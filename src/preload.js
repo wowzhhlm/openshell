@@ -67,6 +67,8 @@ const send = (channel, ...args) => {
 };
 
 contextBridge.exposeInMainWorld('openshell', {
+  // 同步通知主进程"当前右键在终端区域"，抑制原生编辑菜单，避免与终端自定义菜单冲突
+  setContextGuard: (v) => { try { ipcRenderer.sendSync('ctx:guard', !!v); } catch (_) {} },
   appVersion: () => invoke('app:version'),
   outputDirs: () => invoke('app:outputDirs'),
   openOutputDir: (which) => invoke('app:openPath', which),

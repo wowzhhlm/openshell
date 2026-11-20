@@ -119,12 +119,11 @@
           </div>
         </div>
 
-        <!-- 捐赠支持 -->
+        <!-- 关于与帮助 -->
         <div class="device-category">
-          <div class="category-header"><span class="cat-icon">☕</span> 支持工具</div>
+          <div class="category-header"><span class="cat-icon">ℹ️</span> 关于与帮助</div>
           <div class="donate-box">
-            <p class="donate-text">本工具完全免费，无广告无限制。<br>如果觉得好用，欢迎扫码打赏～<br>🙏 感谢每一份支持！</p>
-            <div class="donate-qr" id="donate-qr"></div>
+            <p class="donate-text">OpenShell 网络版 · 拓扑配置工具<br>画布基于 AntV G6，智能化能力由本项目自研。<br>组件许可证状态详见 THIRD_PARTY_NOTICES.md。</p>
           </div>
         </div>
 
@@ -336,25 +335,17 @@
   <div id="about-modal" class="modal-overlay" style="display:none;">
     <div class="modal-box" style="width:520px;">
       <div class="modal-header">ℹ️ 关于本工具</div>
-      <div class="modal-body" style="text-align:center;line-height:2;font-size:14px;">
-        <p>本工具<strong>完全免费</strong>，无广告、无付费墙、无功能限制。</p>
-        <p>如果你觉得它帮你<strong>节省了时间、提高了效率</strong>，<br>可以自愿请我喝杯咖啡，鼓励我持续更新维护～</p>
-        <p style="font-size:24px;">🙏 感谢每一份支持！</p>
-        <p style="color:var(--text-muted);font-size:12px;">（扫码即可，金额随意）</p>
-        <div class="about-qr" id="about-qr"></div>
+      <div class="modal-body" style="line-height:1.9;font-size:13px;">
+        <p><strong>OpenShell 网络版 · 网络拓扑配置工具</strong></p>
+        <p>开源、免费、无注册、无有效期。可离线绘制拓扑，按华为 / 思科 / H3C / 锐捷 / TP-LINK 等品牌生成配置命令。</p>
+        <p><strong>智能化能力（本项目自研）</strong><br>自动 IP 与 VLAN 网段规划、IP / VLAN 冲突检测、配置体检评分、命令逐行中文解释、按设备批量导出 .cfg 配置包。</p>
+        <p><strong>组件来源</strong><br>画布：AntV G6（MIT）；拓扑分析与 CLI 模板：net-topo-cmd-generator-web。<br>该上游仓库 README 声称 MIT 但缺少 LICENSE 文件，授权状态待确认，详见 <code>src/topology/THIRD_PARTY_NOTICES.md</code>。</p>
+        <p style="color:var(--text-muted);font-size:12px;">已移除上游随附的混淆加载器与第三方收款内容；本工具不展示任何第三方收款信息。</p>
       </div>
       <div class="modal-footer">
         <button id="about-close" class="btn-primary">知道了</button>
       </div>
     </div>
-  </div>
-
-  <!-- ============================================================
-       QR HOVER POPUP (左侧支持工具悬停弹出原图)
-       ============================================================ -->
-  <div class="donate-hover-popup" id="donate-popup">
-    <button class="popup-close" id="popup-close">✕</button>
-    <img id="popup-img" src="" alt="赞赏二维码">
   </div>
 
   <!-- ============================================================
@@ -403,6 +394,10 @@
   <script src="js/templates/tplink_switch.js"></script>
   <script src="js/ui-controller.js"></script>
   <script src="js/app.js"></script>
+
+  <!-- OpenShell 网络版自研智能化层（整体删除即可回退到上游引擎） -->
+  <script src="js/smart-config.js"></script>
+  <script src="js/smart-panel.js"></script>
 
   <!-- 动态填充厂商下拉 + 交换机层级 + 功能勾选框 -->
   <script>

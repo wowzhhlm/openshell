@@ -179,11 +179,15 @@
             <option value="privatekey">私钥</option>
           </select>
         </label>
-        <label id="lbl-password">密码<input id="f-password" type="password" autocomplete="new-password" /></label>
+        <label id="lbl-password">密码
+          <span class="input-row"><input id="f-password" type="password" autocomplete="new-password" /><button id="btn-toggle-password" class="toggle-pw" type="button" title="显示/隐藏密码">👁</button></span>
+        </label>
         <label id="lbl-key" class="hidden">私钥文件
           <span class="input-row"><input id="f-keyfile" type="text" placeholder="选择 .pem / .key 文件" /><button id="btn-pick-key">选择</button></span>
         </label>
-        <label id="lbl-passphrase">密钥口令（可选）<input id="f-passphrase" type="password" autocomplete="new-password" /></label>
+        <label id="lbl-passphrase">密钥口令（可选）
+          <span class="input-row"><input id="f-passphrase" type="password" autocomplete="new-password" /><button id="btn-toggle-passphrase" class="toggle-pw" type="button" title="显示/隐藏口令">👁</button></span>
+        </label>
       </div>
       <p id="protocol-hint" class="muted cred-hint">SSH：加密终端连接，支持密码与私钥认证。</p>
       <p id="cred-hint" class="muted cred-hint">凭据将加密保存到本机，不写入会话文件。</p>
@@ -219,7 +223,7 @@
   <div id="batch-import-modal" class="modal hidden">
     <div class="modal-box wide">
       <div class="modal-head"><h3>批量导入会话</h3><button class="modal-close">×</button></div>
-      <p class="muted">支持一次选择多个文件，或选择一个目录递归扫描（最多 500 个文件，单个不超过 2MB）。支持 Xshell .xsh（INI/XML）、SecureCRT .ini、OpenShell JSON，并识别协议类型。</p>
+      <p class="muted">支持一次选择多个文件，或选择一个目录递归扫描（最多 500 个文件，单个不超过 2MB）。支持 Xshell .xsh（INI/XML）、SecureCRT .ini、OpenShell JSON，以及 CSV / TSV 表格（Xshell 批量导入格式，列：名称、主机、协议、端口、用户名、密码、备注）。</p>
       <div class="batch-toolbar">
         <button id="btn-bi-files">选择多个文件</button>
         <button id="btn-bi-dir">选择目录（递归）</button>

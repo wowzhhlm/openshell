@@ -120,6 +120,11 @@ function openSessionModal(id = null) {
   $('f-password').value = '';
   $('f-keyfile').value = s?.keyfile || '';
   $('f-passphrase').value = '';
+  // 打开弹窗时复位为隐藏，避免上次切换留下的明文显示
+  ['f-password', 'f-passphrase'].forEach((id) => { const el = $(id); if (el) el.type = 'password'; });
+  ['btn-toggle-password', 'btn-toggle-passphrase'].forEach((id) => {
+    const b = $(id); if (b) { b.textContent = '👁'; b.title = '显示/隐藏密码'; b.classList.remove('on'); }
+  });
   $('cred-hint').textContent = s ? '凭据已加密保存，留空表示不修改。' : '凭据将加密保存到本机，不写入会话文件。';
   $('btn-session-delete').classList.toggle('hidden', !s);
   toggleProtocolFields();
@@ -127,7 +132,7 @@ function openSessionModal(id = null) {
 }
 function toggleAuthFields() {
   const p = $('f-protocol') ? $('f-protocol').value : 'ssh';
-  if (p === 'telnet' || p === 'raw') return;
+  if (['telnet', 'rlogin', 'raw', 'local', 'serial', 'rdp'].includes(p)) return;
   const isKey = $('f-auth').value === 'privatekey';
   $('lbl-password').classList.toggle('hidden', isKey);
   $('lbl-key').classList.toggle('hidden', !isKey);
@@ -184,6 +189,9 @@ function makeTerminal(tab) {
   // 终端右键菜单：复制/粘贴/全选/清屏/重连
   term.element.addEventListener('contextmenu', (e) => {
     e.preventDefault();
+    // 同步通知主进程本次右键在终端区域，抑制原生编辑菜单，避免弹出两个菜单
+    api.setContextGuard(true);
+    setTimeout(() => api.setContextGuard(false), 1000);
     activateTab(tab.id);
     const menu = $('term-context-menu');
     menu.dataset.tabId = tab.id;
@@ -314,7 +322,8 @@ api.on('ssh:data', (tabId, data) => {
 });
 api.on('ssh:close', (tabId) => {
   const tab = tabId ? tabs.get(tabId) : currentTab();
-  if (tab) tab.connState = 'closed';
+  // 握手/认证失败后紧随而来的 close 不应把 failed 覆盖成 closed，保留失败原因便于排查
+  if (tab && tab.connState !== 'failed') tab.connState = 'closed';
   status('连接已关闭');
 });
 api.on('ssh:error', (tabId, message) => {
@@ -348,30 +357,49 @@ function findReusableTab(session) {
   return null;
 }
 
-/* 在指定标签内执行实际连接（SSH/Telnet/RLOGIN/Raw/SFTP） */
+/* 在指定标签内执行实际连接（SSH/Telnet/RLOGIN/Raw/SFTP）
+   BUG 修复：重连时不再清屏，保留上一次的错误信息，追加分隔线后继续连接，方便排查。 */
 async function connectIntoTab(tab, session, protocol) {
   const term = tab.term;
   tab.session = session;
   tab.sessionKey = session.id || `${protocol}|${session.host}|${session.port}|${session.user}`;
   tab.connState = 'connecting';
-  let ver = '2.0.0';
-  try { ver = await api.appVersion(); } catch (_) {}
+  tab.attempts = (tab.attempts || 0) + 1;
   const cyan = '\x1b[36m', dim = '\x1b[2m', reset = '\x1b[0m';
-  term.writeln(`${cyan}OpenShell ${ver}${reset} · ${protocol.toUpperCase()}`);
-  term.writeln('Copyright (c) 2026 OpenShell contributors. All rights reserved.');
-  term.writeln('');
-  term.writeln(`${dim}输入 help 查看远程 Shell 的可用命令。${reset}`);
-  term.writeln('');
+  if (tab.attempts > 1) {
+    // 重连：保留历史错误信息，仅追加醒目的分隔标记
+    term.writeln('');
+    term.writeln('\x1b[90m────────────────────────────────────────\x1b[0m');
+    term.writeln(`${cyan}◆ 第 ${tab.attempts} 次连接尝试${reset} ${dim}${new Date().toLocaleTimeString()}${reset}`);
+    term.writeln('\x1b[90m────────────────────────────────────────\x1b[0m');
+  } else {
+    let ver = '2.0.0';
+    try { ver = await api.appVersion(); } catch (_) {}
+    term.writeln(`${cyan}OpenShell ${ver}${reset} · ${protocol.toUpperCase()}`);
+    term.writeln('Copyright (c) 2026 OpenShell contributors. All rights reserved.');
+    term.writeln('');
+    term.writeln(`${dim}输入 help 查看远程 Shell 的可用命令。${reset}`);
+    term.writeln('');
+  }
   status(`正在连接 ${session.host}`);
   // 释放旧的数据监听，避免重连后重复绑定导致输入被发送两次
   if (tab.onDataDisposable) { try { tab.onDataDisposable.dispose(); } catch {} }
   tab.onDataDisposable = term.onData((data) => api.sshWrite(tab.id, data));
   const payload = { ...session, protocol, forwardRules: getForwarding() };
   try {
-    if (['telnet', 'raw', 'rlogin'].includes(protocol)) await api.telnetConnect(tab.id, payload);
-    else await api.sshConnect(tab.id, payload);
+    let result;
+    if (['telnet', 'raw', 'rlogin'].includes(protocol)) result = await api.telnetConnect(tab.id, payload);
+    else result = await api.sshConnect(tab.id, payload);
+    // 主进程现在会真正等待握手：ok:false 表示握手/认证失败
+    if (result && result.ok === false) {
+      tab.connState = 'failed';
+      // 错误信息已由主进程通过 ssh:error 事件写入终端，这里只补充排查提示
+      term.writeln('\x1b[33m可在本标签右键选择“重新连接”，或从左侧会话列表再次连接（历史错误信息会保留）。\x1b[0m');
+      status('连接失败');
+      return;
+    }
     tab.connState = 'connected';
-    term.writeln('\x1b[32m连接成功。\x1b[0m');
+    // 不再写假的"连接成功"：主进程在 ready 时已推送"认证成功/已连接"
     if (protocol === 'sftp') {
       setTimeout(() => {
         if (tabs.has(tab.id) && $('sftp-panel').classList.contains('hidden')) toggleSftp();
@@ -379,21 +407,20 @@ async function connectIntoTab(tab, session, protocol) {
     }
   } catch (e) {
     tab.connState = 'failed';
-    // xterm 是终端渲染器而非 HTML，不做 HTML 转义（会显示成 &lt; 字面量）
+    // IPC 层异常时才在此写错误（主进程的 ssh:error 不会重复这条）
     term.writeln('\x1b[31m[连接失败] ' + String(e && e.message ? e.message : e) + '\x1b[0m');
-    term.writeln('\x1b[33m可在本标签右键选择“重新连接”，或从左侧会话列表再次连接（将在原标签重试）。\x1b[0m');
+    term.writeln('\x1b[33m可在本标签右键选择“重新连接”，或从左侧会话列表再次连接（历史错误信息会保留）。\x1b[0m');
     status('连接失败');
   }
 }
 
-/* 在原标签重新连接 */
+/* 在原标签重新连接（保留历史错误信息） */
 async function reconnectTab(tab, session) {
   if (!tab || !tabs.has(tab.id)) return;
   const protocol = Fmt.normalizeProtocol((session || tab.session || {}).protocol);
-  // 清屏并停止旧数据监听，然后复用本标签重连
+  // 停止旧数据监听，断开旧连接；但不清屏，保留之前的错误信息
   if (tab.onDataDisposable) { try { tab.onDataDisposable.dispose(); } catch {} tab.onDataDisposable = null; }
   try { api.sshDisconnect(tab.id); } catch {}
-  if (tab.term) tab.term.clear();
   await connectIntoTab(tab, session || tab.session, protocol);
 }
 
@@ -454,7 +481,9 @@ async function connectSession(session) {
   if (tab) {
     reused = true;
     activateTab(tab.id);
-    if (tab.term) tab.term.clear();
+    // 不清屏：保留上一次连接的错误信息，由 connectIntoTab 追加分隔线后继续排查
+    // 主动断开旧连接，清理主进程可能残留的 socket/转发资源
+    try { api.sshDisconnect(tab.id); } catch {}
   } else {
     tab = createTab(session.name || `${session.user}@${session.host}`, 'ssh');
   }
@@ -699,11 +728,13 @@ async function doBatchImport() {
   const existingKeys = new Set(existing.map(sessionKey));
   const all = [];
   const stats = {};
+  const warnings = [];
   let duplicates = 0;
   let vaultPayload = '';
   for (const f of selected) {
     try {
       const result = Fmt.parseFile(f);
+      if (result.warning) warnings.push(result.warning);
       const sessions = normalizeImported(result.sessions || []).map((s, i) => {
         const src = (result.sessions || [])[i] || {};
         s.credentialId = src.credentialId || src.id || s.id;
@@ -727,9 +758,11 @@ async function doBatchImport() {
     pwMsg = vr.message || pwMsg;
   }
   const summary = Object.entries(stats).map(([k, v]) => `${k}: ${v}`).join('，') || '无';
-  $('bi-summary').textContent = `已导入 ${all.length} 个会话，跳过重复 ${duplicates} 个（${summary}）。${pwMsg}`;
+  const warnText = warnings.length ? '\n\n提示：\n' + warnings.slice(0, 3).join('\n') : '';
+  $('bi-summary').textContent = `已导入 ${all.length} 个会话，跳过重复 ${duplicates} 个（${summary}）。${pwMsg}` + warnText;
   status(`批量导入完成：${all.length} 个会话`);
-  if (all.length) alert(`批量导入完成：${all.length} 个会话，跳过重复 ${duplicates} 个。\n${pwMsg}`);
+  if (all.length) alert(`批量导入完成：${all.length} 个会话，跳过重复 ${duplicates} 个。\n${pwMsg}` + warnText);
+  else if (warnings.length) alert(warnings.join('\n\n'));
 }
 
 function openBatchExport() {
@@ -818,6 +851,7 @@ async function importSessions() {
   if (!files.length) return;
   const all = [];
   const stats = {};
+  const warnings = [];
   let vaultPayload = '';
   for (const f of files) {
     if (f.error || !Fmt) { stats.unknown = (stats.unknown || 0) + 1; continue; }
@@ -829,10 +863,12 @@ async function importSessions() {
       all.push(...sessions);
       stats[result.format] = (stats[result.format] || 0) + sessions.length;
       if (result.vault) vaultPayload = result.vault;
+      if (result.warning) warnings.push(result.warning);
     } catch { stats.unknown = (stats.unknown || 0) + 1; }
   }
   if (!all.length) {
-    alert('未从所选文件中解析出有效会话。\n\n支持：OpenShell JSON（含加密密码保险库）、Xshell .xsh、SecureCRT .ini。');
+    const base = '未从所选文件中解析出有效会话。\n\n支持：OpenShell JSON（含加密密码保险库）、Xshell .xsh / .csv / .tsv、SecureCRT .ini。';
+    alert(warnings.length ? base + '\n\n' + warnings.join('\n\n') : base);
     return;
   }
   saveSessions([...getSessions(), ...all]);
@@ -842,7 +878,8 @@ async function importSessions() {
     const vr = await decryptVaultOnImport(vaultPayload);
     pwMsg = '\n\n密码还原：' + vr.message;
   }
-  alert(`已导入 ${all.length} 个会话：\n${summary}${pwMsg}`);
+  alert(`已导入 ${all.length} 个会话：\n${summary}${pwMsg}` +
+    (warnings.length ? '\n\n提示：\n' + warnings.join('\n') : ''));
 }
 /* ---------------- 主密码保险库：导出/导入密码 ----------------
    导出：默认导出密码，先验证主密码，用主密码加密密码字典写入会话文件。
@@ -922,6 +959,24 @@ $('btn-pick-key').onclick = async () => {
   const p = await api.selectPrivateKey();
   if (p) $('f-keyfile').value = p;
 };
+/* 密码/口令框「显示·隐藏」切换，方便核对输入是否正确 */
+function bindPasswordToggle(btnId, inputId) {
+  const btn = $(btnId), input = $(inputId);
+  if (!btn || !input) return;
+  btn.onclick = (e) => {
+    e.preventDefault();
+    const visible = input.type === 'text';
+    input.type = visible ? 'password' : 'text';
+    btn.textContent = visible ? '👁' : '🙈';
+    btn.title = visible ? '显示密码' : '隐藏密码';
+    btn.classList.toggle('on', !visible);
+    input.focus();
+  };
+  // 关闭弹窗时复位为隐藏，避免明文残留
+  input.closest('.modal')?.addEventListener('transitionend', () => {}, { once: true });
+}
+bindPasswordToggle('btn-toggle-password', 'f-password');
+bindPasswordToggle('btn-toggle-passphrase', 'f-passphrase');
 document.querySelectorAll('.modal-close, .cancel').forEach((b) => {
   b.onclick = () => b.closest('.modal').classList.add('hidden');
 });

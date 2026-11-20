@@ -37,6 +37,8 @@
   function guessFormat(text, fileName) {
     const t = text || '';
     const name = (fileName || '').toLowerCase();
+    // .xts 是 Xshell 专有加密归档，直接按扩展名识别（内容为二进制，不做内容嗅探）
+    if (name.endsWith('.xts')) return 'xts';
     if (/^\s*\{|^\s*\[\s*\{/.test(t)) {
       try {
         const parsed = JSON.parse(t);
@@ -49,6 +51,18 @@
     if (/\[Connection\]|\[SSH\]|\[Session\]/i.test(t) || /^\s*(Host|Port|UserName|AuthMethod)\s*=/im.test(t)) return 'xshell-ini';
     if (name.endsWith('.xsh')) return 'xshell-ini';
     if (name.endsWith('.ini')) return 'securecrt';
+    // 表格格式：优先按扩展名，其次按首行分隔符 + 内容特征嗅探
+    if (name.endsWith('.tsv')) return 'tsv';
+    if (name.endsWith('.csv')) return 'csv';
+    const first = t.split(/\r?\n/).find((l) => l.trim()) || '';
+    const comma = (first.match(/,/g) || []).length;
+    const tab = (first.match(/\t/g) || []).length;
+    const semi = (first.match(/;/g) || []).length;
+    if (comma >= 1 || tab >= 1 || semi >= 1) {
+      // 表头含典型列名，或首行像 IP/域名，判定为表格
+      if (/(name|host|protocol|port|user|password|会话|主机|协议|端口|用户名|密码)/i.test(first) ||
+        /\d{1,3}(\.\d{1,3}){3}/.test(t)) return tab > comma ? 'tsv' : 'csv';
+    }
     return 'unknown';
   }
 
@@ -203,13 +217,132 @@
     };
   }
 
+  /* ---------------- 表格格式（CSV / TSV）----------------
+     Xshell「从 CSV 文件导入」使用的固定列顺序：
+       Name, Host, Protocol, Port, User, Password, Description
+     本解析器同时兼容：任意列序（按表头名智能映射）、中英文表头、
+     制表符/逗号/分号分隔、带引号字段、UTF-8 BOM、CRLF。 */
+  const HEADER_ALIASES = {
+    name: ['name', 'sessionname', 'session name', '会话名称', '名称', '会话名', '会话', '标题'],
+    host: ['host', 'hostname', 'host name', 'ip', 'ipaddress', 'address', '主机', '主机地址', '地址', '服务器', '服务器地址'],
+    protocol: ['protocol', 'proto', '协议', '连接协议', '类型'],
+    port: ['port', '端口号', '端口'],
+    user: ['user', 'username', 'user name', 'login', '用户名', '登录名', '账户', '帐号', '账号'],
+    password: ['password', 'pwd', '密码', '口令'],
+    group: ['group', 'folder', '分组', '文件夹', '目录', '类别'],
+    description: ['description', 'desc', 'comment', 'remark', '备注', '描述', '说明'],
+    auth: ['auth', 'authmethod', 'authentication', '认证', '认证方式'],
+    keyfile: ['keyfile', 'privatekey', 'identityfile', '私钥', '密钥文件']
+  };
+
+  function detectDelimiter(text) {
+    const first = (text || '').split(/\r?\n/).find((l) => l.trim()) || '';
+    const counts = { ',': (first.match(/,/g) || []).length,
+      '\t': (first.match(/\t/g) || []).length,
+      ';': (first.match(/;/g) || []).length };
+    let best = ',', max = -1;
+    Object.keys(counts).forEach((d) => { if (counts[d] > max) { max = counts[d]; best = d; } });
+    return max > 0 ? best : ',';
+  }
+
+  function splitCsvLine(line, delim) {
+    const out = [];
+    let cur = '', inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (inQuotes) {
+        if (ch === '"') {
+          if (line[i + 1] === '"') { cur += '"'; i++; }
+          else inQuotes = false;
+        } else cur += ch;
+      } else if (ch === '"') inQuotes = true;
+      else if (ch === delim) { out.push(cur); cur = ''; }
+      else cur += ch;
+    }
+    out.push(cur);
+    return out.map((s) => s.trim());
+  }
+
+  function matchHeader(cell) {
+    const v = safe(cell).toLowerCase().replace(/[\s_\-]/g, '');
+    for (const key of Object.keys(HEADER_ALIASES)) {
+      if (HEADER_ALIASES[key].some((a) => a.replace(/[\s_\-]/g, '') === v)) return key;
+    }
+    return '';
+  }
+
+  function looksLikeHost(v) {
+    const s = safe(v);
+    if (!s) return false;
+    // IPv4 / 域名 / 主机名（排除纯数字端口、排除用户名样式）
+    return /^\d{1,3}(\.\d{1,3}){3}$/.test(s) ||
+      /^[a-z0-9][a-z0-9.\-_]*\.[a-z]{2,}$/i.test(s) ||
+      /^[a-z0-9][a-z0-9\-_]*$/i.test(s) && !/^\d+$/.test(s);
+  }
+
+  function parseTable(text, fileName, groupHint) {
+    const clean = String(text || '').replace(/^\uFEFF/, '');
+    const delim = detectDelimiter(clean);
+    const lines = clean.split(/\r?\n/).filter((l) => l.trim().length);
+    if (!lines.length) return [];
+    const rows = lines.map((l) => splitCsvLine(l, delim));
+    // 判断首行是否为表头：存在可识别的列名
+    const firstCells = rows[0].map(matchHeader);
+    const hasHeader = firstCells.filter(Boolean).length >= 2;
+    let header = hasHeader ? firstCells : [];
+    let dataRows = hasHeader ? rows.slice(1) : rows;
+    // 无表头时按 Xshell 固定列顺序推断
+    if (!hasHeader) {
+      header = ['name', 'host', 'protocol', 'port', 'user', 'password', 'description'];
+    }
+    const sessions = [];
+    dataRows.forEach((cells) => {
+      const rec = {};
+      header.forEach((key, i) => { if (key && cells[i] != null) rec[key] = safe(cells[i]); });
+      // 若没有表头映射出 host，尝试在任意列里找一个像 IP/域名的值
+      let host = rec.host;
+      if (!host && !hasHeader) {
+        host = cells.find((c) => looksLikeHost(c)) || '';
+        rec.name = rec.name || safe(cells[0]);
+      }
+      if (!host || !looksLikeHost(host)) return;
+      const protocol = normalizeProtocol(rec.protocol);
+      sessions.push({
+        name: rec.name || host,
+        group: groupHint || rec.group || '',
+        host,
+        port: parseInt(rec.port, 10) || defaultPort(protocol),
+        user: rec.user || '',
+        protocol,
+        auth: /key|私钥|publickey/i.test(rec.auth || '') ? 'privatekey' : 'password',
+        keyfile: rec.keyfile || '',
+        password: '', passphrase: '',
+        // 明文密码仅提示，不直接写入会话对象（由导入流程决定是否使用）
+        plainPassword: rec.password || '',
+        description: rec.description || '',
+        needsCredential: true
+      });
+    });
+    return sessions;
+  }
+
   function parseFile(file) {
     const text = file.text || '';
     const fileName = file.name || '';
     const format = guessFormat(text, fileName);
     let sessions = null;
     let vault = '';
-    if (format === 'openshell') sessions = parseOpenSsh(text);
+    let warning = '';
+    if (format === 'xts') {
+      // .xts 是 Xshell 专有的加密打包格式（可含主密码保护的密码），无法离线解析
+      warning = '「' + (fileName || 'Xshell 导出文件') + '」是 Xshell 专有的加密归档格式（.xts），'
+        + '内容为二进制加密数据，OpenShell 无法直接读取。\n'
+        + '请在 Xshell 中改用以下任一方式重新导出后再导入：\n'
+        + '  1) 文件 → 导入/导出 → 选择「导出为 CSV」（OpenShell 支持 CSV/TSV）；\n'
+        + '  2) 会话管理器中逐个「另存为」生成 .xsh 文件；\n'
+        + '  3) 直接复制 Xshell 会话目录（文档\\NetSarang Computer\\Xshell\\Sessions）里的 .xsh 文件。';
+    }
+    else if (format === 'openshell') sessions = parseOpenSsh(text);
     else if (format === 'openshell-vault') {
       const parsed = parseOpenSshVault(text);
       sessions = parsed.sessions;
@@ -218,7 +351,14 @@
     else if (format === 'xshell-xml') sessions = parseXshellXml(text, fileName, file.group);
     else if (format === 'xshell-ini') sessions = parseXshellIni(text, fileName, file.group);
     else if (format === 'securecrt') sessions = parseSecureCrt(text, fileName, file.group);
-    return { format, sessions: sessions || [], vault };
+    else if (format === 'csv' || format === 'tsv') {
+      sessions = parseTable(text, fileName, file.group);
+      if (sessions && sessions.length && sessions.some((s) => s.plainPassword)) {
+        warning = '表格中包含明文密码，出于安全考虑未自动写入凭据；请在会话编辑中重新填写，'
+          + '或改用「主密码加密」的 OpenShell JSON 导出。';
+      }
+    }
+    return { format, sessions: sessions || [], vault, warning };
   }
 
   function safeName(name) {
@@ -286,7 +426,8 @@
 
   return {
     PROTOCOLS, protocolFrom, normalizeProtocol, defaultPort, protocolName,
-    guessFormat, parseFile, parseOpenSsh, parseOpenSshVault, parseXshellIni, parseXshellXml, parseSecureCrt,
+    guessFormat, parseFile, parseOpenSsh, parseOpenSshVault, parseTable,
+    parseXshellIni, parseXshellXml, parseSecureCrt,
     toXshell, toSecureCrt, toOpenShell, safeName
   };
 });

@@ -9,18 +9,16 @@ const SSH_CONST = require('ssh2/lib/protocol/constants');
 const Vault = require('./vault');
 const FTP = require('./ftp');
 
-// 构建"现代优先 + 兼容旧设备"的算法列表：直接使用 ssh2 官方 SUPPORTED 全集，
+// 构建"现代优先 + 兼容旧设备"的算法列表：直接使用 ssh2 官方 DEFAULT/SUPPORTED 全集，
 // 把旧算法（group14-sha1 / group1-sha1 / cbc / 3des / ssh-rsa / ssh-dss）也纳入，
 // 解决老服务器 "no matching key exchange algorithm / cipher / host key" 握手失败。
+// 注意：ssh2 的 generateAlgorithmList() 会逐项严格校验数组中的算法名，
+// 任何自造/不支持的名称都会直接抛错，因此这里绝不能手写算法名，只用官方常量。
 function uniq(list) { return [...new Set(list.filter(Boolean))]; }
 const KEX_LIST = uniq([...(SSH_CONST.DEFAULT_KEX || []), ...(SSH_CONST.SUPPORTED_KEX || [])]);
 const CIPHER_LIST = uniq([...(SSH_CONST.DEFAULT_CIPHER || []), ...(SSH_CONST.SUPPORTED_CIPHER || [])]);
 const HOSTKEY_LIST = uniq([...(SSH_CONST.DEFAULT_SERVER_HOST_KEY || []), ...(SSH_CONST.SUPPORTED_SERVER_HOST_KEY || [])]);
-const HMAC_LIST = [
-  'hmac-sha2-256-etm@openssh.com', 'hmac-sha2-512-etm@openssh.com',
-  'hmac-sha2-256', 'hmac-sha2-512', 'hmac-sha1', 'hmac-sha1-etm@openssh.com',
-  'hmac-md5', 'hmac-md5-etm@openssh.com'
-];
+const HMAC_LIST = uniq([...(SSH_CONST.DEFAULT_MAC || []), ...(SSH_CONST.SUPPORTED_MAC || [])]);
 
 let mainWindow = null;
 const tabs = new Map();
@@ -45,7 +43,7 @@ const MASTER_FILE = () => path.join(app.getPath('userData'), 'master-verifier.js
 const EXPORT_DIR = path.join(OUTPUT_ROOT, '导出');
 const DOWNLOAD_DIR = path.join(OUTPUT_ROOT, '下载');
 const REPORT_DIR = path.join(OUTPUT_ROOT, '报告');
-const SESSION_EXTS = new Set(['.xsh', '.ini', '.json', '.xml', '.txt']);
+const SESSION_EXTS = new Set(['.xsh', '.ini', '.json', '.xml', '.txt', '.csv', '.tsv', '.xts', '.xse']);
 const MAX_BATCH_FILES = 500;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
@@ -71,6 +69,40 @@ function send(channel, ...args) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, ...args);
 }
 
+let ctxGuard = false; // 终端区域右键时为 true，抑制原生编辑菜单
+ipcMain.on('ctx:guard', (e, v) => { ctxGuard = !!v; e.returnValue = true; });
+
+/* 为输入框/文本区域提供原生右键编辑菜单。
+   由于 Menu.setApplicationMenu(null) 禁用了全局菜单，Electron 默认不再为
+   input/textarea 显示右键菜单，导致新建会话表单无法复制粘贴。这里显式补上。 */
+function attachEditContextMenu(win) {
+  if (!win || !win.webContents) return;
+  win.webContents.on('context-menu', (_event, params) => {
+    if (ctxGuard) { ctxGuard = false; return; } // 终端自定义菜单接管，跳过原生菜单
+    const { isEditable, selectionText, editFlags } = params;
+    const template = [];
+    if (isEditable) {
+      template.push(
+        { label: '撤销', role: 'undo', enabled: editFlags.canUndo },
+        { label: '重做', role: 'redo', enabled: editFlags.canRedo },
+        { type: 'separator' },
+        { label: '剪切', role: 'cut', enabled: editFlags.canCut },
+        { label: '复制', role: 'copy', enabled: editFlags.canCopy },
+        { label: '粘贴', role: 'paste', enabled: editFlags.canPaste },
+        { label: '全选', role: 'selectAll', enabled: editFlags.canSelectAll },
+        { type: 'separator' },
+        { label: '删除', role: 'delete', enabled: editFlags.canDelete }
+      );
+    } else if (selectionText && selectionText.length) {
+      // 非编辑区域但选中了文本（如标签名、说明文字），提供复制
+      template.push({ label: '复制', role: 'copy' });
+    }
+    if (!template.length) return;
+    const menu = Menu.buildFromTemplate(template);
+    menu.popup({ window: win });
+  });
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -86,6 +118,7 @@ function createWindow() {
       spellcheck: false
     }
   });
+  attachEditContextMenu(mainWindow);
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
   mainWindow.on('closed', () => {
     tabs.forEach((tab) => closeTabResources(tab));
@@ -141,7 +174,7 @@ ipcMain.handle('dialog:selectImportFiles', async () => {
     title: '导入会话文件（支持多选）',
     properties: ['openFile', 'multiSelections'],
     filters: [
-      { name: '会话文件', extensions: ['xsh', 'ini', 'json', 'xml', 'xse'] },
+      { name: '会话与表格文件', extensions: ['xsh', 'ini', 'json', 'xml', 'xse', 'csv', 'tsv', 'xts'] },
       { name: '所有文件', extensions: ['*'] }
     ]
   });
@@ -513,12 +546,16 @@ ipcMain.handle('ssh:connect', async (_event, tabId, session) => {
     readyTimeout: 20000,
     keepaliveInterval: 10000,
     hostHash: 'sha256',
-    // 显式声明算法列表：默认安全算法在前优先协商，兼容旧设备的算法在后兜底，
-    // 解决 "no matching key exchange algorithm" / "no matching cipher" 握手失败。
-    kex: KEX_LIST,
-    ciphers: CIPHER_LIST,
-    hmac: HMAC_LIST,
-    serverHostKey: HOSTKEY_LIST,
+    // 关键：ssh2 只读取 cfg.algorithms 对象内的算法列表（键名为 kex/cipher/serverHostKey/hmac）。
+    // 之前误放在 cfg 顶层，ssh2 完全忽略，仍用默认算法导致老旧服务器握手失败。
+    // 此处用 DEFAULT+SUPPORTED 全集，现代算法优先、旧算法兜底：
+    // 兼容 diffie-hellman-group14-sha1 / aes128-cbc / ssh-rsa 等旧设备算法。
+    algorithms: {
+      kex: KEX_LIST,
+      cipher: CIPHER_LIST,
+      hmac: HMAC_LIST,
+      serverHostKey: HOSTKEY_LIST
+    },
     hostVerifier: (hex, callback) => {
       send('ssh:progress', tabId, '正在验证主机密钥…');
       verifyHostKey(cfg.host + ':' + cfg.port, hex).then((ok) => {
@@ -552,57 +589,73 @@ ipcMain.handle('ssh:connect', async (_event, tabId, session) => {
   const conn = new Client();
   tab.conn = conn;
   send('ssh:progress', tabId, `Connecting to ${cfg.host}:${cfg.port}...`);
-  conn.on('handshake', () => {
-    send('ssh:progress', tabId, 'SSH 握手完成，正在认证…');
-  });
-  conn.on('ready', () => {
-    send('ssh:progress', tabId, '认证成功，正在打开终端…');
-    send('ssh:status', tabId, '已连接 ' + cfg.host);
-    if (session.protocol === 'sftp') {
-      send('ssh:progress', tabId, 'SFTP 文件传输模式已就绪。');
-      conn.sftp((sftpErr, sftp) => {
-        if (sftpErr) {
-          send('ssh:error', tabId, 'SFTP 初始化失败: ' + sftpErr.message);
-          return;
-        }
-        tab.sftp = sftp;
-        send('ssh:status', tabId, '已连接 ' + cfg.host + '（SFTP 可用）');
-      });
-      return;
-    }
-    conn.shell((err, stream) => {
-      if (err) {
-        send('ssh:error', tabId, 'Shell 打开失败: ' + err.message);
+
+  // 真正等待握手/认证结果：只有 ready 才算成功，error/close 都要让 await 结束，
+  // 避免旧逻辑"立刻返回 ok:true"造成的假"连接成功"提示。
+  const handshake = new Promise((resolve) => {
+    let settled = false;
+    const done = (ok, err) => {
+      if (settled) return;
+      settled = true;
+      resolve({ ok, error: err || '' });
+    };
+    conn.on('handshake', () => {
+      send('ssh:progress', tabId, 'SSH 握手完成，正在认证…');
+    });
+    conn.on('ready', () => {
+      send('ssh:progress', tabId, '认证成功，正在打开终端…');
+      send('ssh:status', tabId, '已连接 ' + cfg.host);
+      done(true);
+      if (session.protocol === 'sftp') {
+        send('ssh:progress', tabId, 'SFTP 文件传输模式已就绪。');
+        conn.sftp((sftpErr, sftp) => {
+          if (sftpErr) { send('ssh:error', tabId, 'SFTP 初始化失败: ' + sftpErr.message); return; }
+          tab.sftp = sftp;
+          send('ssh:status', tabId, '已连接 ' + cfg.host + '（SFTP 可用）');
+        });
         return;
       }
-      tab.stream = stream;
-      stream.on('data', (data) => send('ssh:data', tabId, data.toString('utf8')));
-      stream.stderr.on('data', (data) => send('ssh:data', tabId, data.toString('utf8')));
-      stream.on('close', () => {
-        send('ssh:data', tabId, '\r\n[Connection closed]');
-        send('ssh:close', tabId);
-      });
-      stream.setWindow(24, 80, 0, 0);
-      applyForwarding(tab, session.forwardRules);
-      conn.sftp((sftpErr, sftp) => {
-        if (sftpErr) return;
-        tab.sftp = sftp;
-        send('ssh:status', tabId, '已连接 ' + cfg.host + '（SFTP 可用）');
+      conn.shell((err, stream) => {
+        if (err) { send('ssh:error', tabId, 'Shell 打开失败: ' + err.message); return; }
+        tab.stream = stream;
+        stream.on('data', (data) => send('ssh:data', tabId, data.toString('utf8')));
+        stream.stderr.on('data', (data) => send('ssh:data', tabId, data.toString('utf8')));
+        stream.on('close', () => {
+          send('ssh:data', tabId, '\r\n[Connection closed]');
+          send('ssh:close', tabId);
+        });
+        stream.setWindow(24, 80, 0, 0);
+        applyForwarding(tab, session.forwardRules);
+        conn.sftp((sftpErr, sftp) => {
+          if (sftpErr) return;
+          tab.sftp = sftp;
+          send('ssh:status', tabId, '已连接 ' + cfg.host + '（SFTP 可用）');
+        });
       });
     });
+    conn.on('error', (err) => {
+      send('ssh:error', tabId, err.message);
+      send('ssh:status', tabId, '连接失败');
+      done(false, err.message);
+    });
+    conn.on('close', () => {
+      send('ssh:progress', tabId, '\x1b[2m[Connection closed]\x1b[0m');
+      tab.forwardServers.forEach((s) => { try { s.close(); } catch {} });
+      tab.forwardServers = [];
+      if (tabs.get(tabId) === tab) send('ssh:close', tabId);
+      done(false, '连接已关闭');
+    });
   });
-  conn.on('error', (err) => {
-    send('ssh:error', tabId, err.message);
+
+  try {
+    conn.connect(cfg);
+  } catch (e) {
+    // 算法配置等非法时 ssh2 会在此抛错，给出明确提示而不是让整个 handler 崩溃
+    send('ssh:error', tabId, '连接配置错误: ' + e.message);
     send('ssh:status', tabId, '连接失败');
-  });
-  conn.on('close', () => {
-    send('ssh:progress', tabId, '\x1b[2m[Connection closed]\x1b[0m');
-    tab.forwardServers.forEach((s) => { try { s.close(); } catch {} });
-    tab.forwardServers = [];
-    if (tabs.get(tabId) === tab) send('ssh:close', tabId);
-  });
-  conn.connect(cfg);
-  return { ok: true };
+    return { ok: false, error: e.message };
+  }
+  return handshake;
 });
 
 ipcMain.on('ssh:write', (_event, tabId, data) => {
@@ -735,6 +788,7 @@ function openTopologyWindow() {
     height: 960,
     title: 'OpenShell 网络版 · 网络拓扑配置工具',
     webPreferences: {
+      preload: path.join(__dirname, 'topology', 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: false,
@@ -742,10 +796,62 @@ function openTopologyWindow() {
     }
   });
   topologyWindow.loadFile(path.join(__dirname, 'topology', 'index.html'));
+  attachEditContextMenu(topologyWindow);
   topologyWindow.on('closed', () => { topologyWindow = null; });
 }
 
 ipcMain.handle('topology:open', () => { openTopologyWindow(); return { ok: true }; });
+
+/* ---------------- 拓扑配置包导出（智能面板） ----------------
+   渲染层只允许提交 [{name, content}]，文件名/内容/数量全部在主进程复核，
+   防止路径穿越与超大文件；结果统一写入 D:\openshell-network\导出。
+   ------------------------------------------------------------ */
+ipcMain.handle('topology:saveConfigPackage', async (_event, payload) => {
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const files = Array.isArray(p.files) ? p.files : [];
+  const packageText = String(p.packageText || '');
+  if (!files.length && !packageText.trim()) return { ok: false, error: '没有可导出的配置内容' };
+  if (files.length > 200) return { ok: false, error: '设备文件数量超过上限（200）' };
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const dir = path.join(EXPORT_DIR, '配置包_' + stamp);
+  await fsp.mkdir(dir, { recursive: true });
+
+  const written = [];
+  const MAX_BYTES = 1024 * 1024;
+  const MAX_TOTAL = 8 * 1024 * 1024;
+  let total = 0;
+  for (const f of files) {
+    if (!f || typeof f !== 'object') continue;
+    const safe = (path.basename(String(f.name || 'device.cfg'))
+      .replace(/[\\/:*?"<>|\r\n]/g, '_').slice(0, 120)) || 'device.cfg';
+    const content = String(f.content || '');
+    const size = Buffer.byteLength(content, 'utf8');
+    if (size > MAX_BYTES || total + size > MAX_TOTAL) continue;
+    await fsp.writeFile(path.join(dir, safe), content, 'utf8');
+    total += size;
+    written.push(safe);
+  }
+  if (packageText.trim() && Buffer.byteLength(packageText, 'utf8') <= MAX_BYTES * 4) {
+    const pkgName = (path.basename(String(p.packageName || 'openshell-配置包.txt'))
+      .replace(/[\\/:*?"<>|\r\n]/g, '_').slice(0, 120)) || 'openshell-配置包.txt';
+    await fsp.writeFile(path.join(dir, pkgName), packageText, 'utf8');
+    written.push(pkgName);
+  }
+  const manifest = [
+    'OpenShell 网络版 · 配置包清单',
+    '生成时间: ' + String(p.generatedAt || new Date().toLocaleString('zh-CN')),
+    '文件数: ' + written.length,
+    '',
+    ...written.map((n, i) => String(i + 1).padStart(2, '0') + '. ' + n),
+    '',
+    '⚠ 请先人工复核配置，确认无误后再下发到设备。',
+    '"!" 开头的行为阅读注释，部分设备不接受注释行，下发前可整行删除。'
+  ].join('\r\n');
+  await fsp.writeFile(path.join(dir, '清单.txt'), manifest, 'utf8');
+  written.push('清单.txt');
+  return { ok: true, dir, written };
+});
 
 /* ---------------- 本地终端 (local) ---------------- */
 let localSeq = 0;
