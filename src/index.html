@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self';" />
+  <title>OpenShell 网络版 · 多协议终端与网络拓扑配置工具</title>
+  <link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">OS</span><span>OpenShell 网络版</span><small>开源 · 多协议 · 无注册 · 无有效期</small></div>
+      <nav class="menubar" id="menubar">
+        <div class="menu">
+          <button class="menu-trigger">文件</button>
+          <div class="menu-popup">
+            <button data-action="new-session">新建会话</button>
+            <button data-action="quick-connect">快速连接</button>
+            <hr />
+            <button data-action="batch-import">批量导入会话…</button>
+            <button data-action="batch-export">批量导出会话…</button>
+            <hr />
+            <button data-action="open-exports">打开导出目录</button>
+            <button data-action="open-downloads">打开下载目录</button>
+          </div>
+        </div>
+        <div class="menu">
+          <button class="menu-trigger">编辑</button>
+          <div class="menu-popup">
+            <button data-action="copy-selection">复制终端选中内容</button>
+            <button data-action="paste">粘贴到当前终端</button>
+            <hr />
+            <button data-action="edit-selected">编辑选中会话</button>
+            <button data-action="duplicate-selected">复制选中会话</button>
+            <hr />
+            <button data-action="clear-terminal">清空当前终端</button>
+          </div>
+        </div>
+        <div class="menu">
+          <button class="menu-trigger">会话</button>
+          <div class="menu-popup">
+            <button data-action="connect-selected">连接选中会话</button>
+            <button data-action="edit-selected">编辑选中会话</button>
+            <button data-action="delete-selected">删除选中会话</button>
+            <hr />
+            <button data-action="disconnect-current">断开当前连接</button>
+            <button data-action="close-current">关闭当前标签</button>
+          </div>
+        </div>
+        <div class="menu">
+          <button class="menu-trigger">工具</button>
+          <div class="menu-popup">
+            <button data-action="topology">网络拓扑与配置生成</button>
+            <button data-action="linux-cmd">Linux 命令查询</button>
+            <button data-action="deploy-config">下发配置到交换机</button>
+            <hr />
+            <button data-action="sftp-toggle">文件传输（SFTP）</button>
+            <button data-action="forwarding">端口转发</button>
+            <button data-action="serial">串口</button>
+            <button data-action="script">脚本发送</button>
+            <hr />
+            <button data-action="master-password">主密码设置</button>
+            <button data-action="settings">设置</button>
+          </div>
+        </div>
+        <div class="menu">
+          <button class="menu-trigger">视图</button>
+          <div class="menu-popup">
+            <button data-action="theme-dark">深空蓝主题（默认）</button>
+            <button data-action="theme-light">浅色主题</button>
+            <button data-action="theme-solarized">Solarized 主题</button>
+            <hr />
+            <button data-action="font-larger">放大字体</button>
+            <button data-action="font-smaller">缩小字体</button>
+          </div>
+        </div>
+        <div class="menu">
+          <button class="menu-trigger">帮助</button>
+          <div class="menu-popup">
+            <button data-action="compare">与 Xshell / SecureCRT 对比</button>
+            <button data-action="about">关于 OpenShell</button>
+          </div>
+        </div>
+      </nav>
+      <div class="top-actions">
+        <button id="btn-new-session" class="primary">＋ 新建会话</button>
+        <button id="btn-sftp-toggle">文件传输</button>
+        <button id="btn-batch-import">批量导入</button>
+        <button id="btn-batch-export">批量导出</button>
+      </div>
+    </header>
+
+    <div class="body">
+      <aside class="sidebar">
+        <div class="sidebar-title">
+          <span>会话管理</span>
+          <button id="btn-import-sessions" title="导入 Xshell/SecureCRT/OpenShell 会话">导入文件</button>
+        </div>
+        <input id="session-filter" class="search" type="search" placeholder="搜索会话…" />
+        <div id="session-tree" class="session-tree"></div>
+        <div class="export-box">
+          <div class="export-title">快速导出（全部会话 · 需选择目录）</div>
+          <label class="check export-pw"><input id="opt-include-password" type="checkbox" checked /> 导出密码（用主密码加密）</label>
+          <button id="btn-export-openshell">OpenShell JSON</button>
+          <button id="btn-export-xshell">Xshell（.xsh）</button>
+          <button id="btn-export-securecrt">SecureCRT（.ini）</button>
+          <hr />
+          <button id="btn-open-export-dir">打开默认导出目录</button>
+        </div>
+        <div class="sidebar-foot">
+          <button id="btn-quick-connect">快速连接</button>
+        </div>
+      </aside>
+
+      <main class="main">
+        <div id="tabbar" class="tabbar"></div>
+        <div class="workspace">
+          <div id="terminal-host" class="terminal-host">
+            <div id="empty-state" class="empty-state">
+              <h2>OpenShell 网络版</h2>
+              <p>从左侧选择会话，或点击“新建会话”开始连接。</p>
+              <p class="muted">支持 SSH、Telnet、RLOGIN、SFTP、FTP、RDP、串口、本地终端与原始 TCP。</p>
+              <p class="muted">内置网络拓扑绘制、交换机配置自动生成、Linux 命令查询。</p>
+              <p class="muted">会话可右键编辑；导出密码受主密码保护。</p>
+            </div>
+          </div>
+          <aside id="sftp-panel" class="sftp-panel hidden">
+            <div class="panel-head">
+              <span>SFTP 文件管理</span>
+              <button id="btn-sftp-close">×</button>
+            </div>
+            <div class="sftp-toolbar">
+              <button id="btn-sftp-up">↑ 上级</button>
+              <button id="btn-sftp-refresh">刷新</button>
+              <button id="btn-sftp-upload">上传</button>
+              <button id="btn-sftp-download">下载</button>
+              <button id="btn-sftp-delete" class="danger">删除</button>
+            </div>
+            <div id="sftp-path" class="sftp-path">—</div>
+            <div id="sftp-list" class="sftp-list"></div>
+          </aside>
+        </div>
+        <footer class="statusbar">
+          <span id="status-left">就绪</span>
+          <span id="status-right">OpenShell 网络版 2.0.0 · MIT · 输出目录 D:\openshell-network</span>
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <!-- 会话编辑 -->
+  <div id="session-modal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head"><h3 id="session-modal-title">新建会话</h3><button class="modal-close">×</button></div>
+      <div class="form-grid">
+        <label>会话名称<input id="f-name" type="text" placeholder="例如：生产服务器" /></label>
+        <label>分组<input id="f-group" type="text" placeholder="例如：生产环境" /></label>
+        <label>协议
+          <select id="f-protocol">
+            <option value="ssh">SSH（默认端口 22）</option>
+            <option value="telnet">Telnet（默认端口 23）</option>
+            <option value="rlogin">RLOGIN（默认端口 513）</option>
+            <option value="sftp">SFTP 文件传输（默认端口 22）</option>
+            <option value="ftp">FTP 文件传输（默认端口 21）</option>
+            <option value="rdp">RDP 远程桌面（默认端口 3389）</option>
+            <option value="serial">Serial 串口（本地 COM 口）</option>
+            <option value="local">Local 本地终端（系统 Shell）</option>
+            <option value="raw">原始 TCP（自定义端口）</option>
+          </select>
+        </label>
+        <label>主机<input id="f-host" type="text" placeholder="example.com 或 IP 地址" /></label>
+        <label>端口<input id="f-port" type="number" value="22" min="1" max="65535" /></label>
+        <label id="lbl-user">用户名<input id="f-user" type="text" placeholder="root" /></label>
+        <label id="lbl-auth">认证方式
+          <select id="f-auth">
+            <option value="password">密码</option>
+            <option value="privatekey">私钥</option>
+          </select>
+        </label>
+        <label id="lbl-password">密码<input id="f-password" type="password" autocomplete="new-password" /></label>
+        <label id="lbl-key" class="hidden">私钥文件
+          <span class="input-row"><input id="f-keyfile" type="text" placeholder="选择 .pem / .key 文件" /><button id="btn-pick-key">选择</button></span>
+        </label>
+        <label id="lbl-passphrase">密钥口令（可选）<input id="f-passphrase" type="password" autocomplete="new-password" /></label>
+      </div>
+      <p id="protocol-hint" class="muted cred-hint">SSH：加密终端连接，支持密码与私钥认证。</p>
+      <p id="cred-hint" class="muted cred-hint">凭据将加密保存到本机，不写入会话文件。</p>
+      <div class="modal-foot">
+        <button id="btn-session-delete" class="danger hidden">删除</button>
+        <span class="spacer"></span>
+        <button class="cancel">取消</button>
+        <button id="btn-session-save" class="primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 会话右键菜单 -->
+  <div id="context-menu" class="context-menu hidden">
+    <button data-action="connect">连接</button>
+    <button data-action="edit">编辑会话</button>
+    <button data-action="duplicate">复制会话</button>
+    <hr />
+    <button data-action="delete" class="danger">删除会话</button>
+  </div>
+
+  <!-- 批量导入 -->
+  <div id="batch-import-modal" class="modal hidden">
+    <div class="modal-box wide">
+      <div class="modal-head"><h3>批量导入会话</h3><button class="modal-close">×</button></div>
+      <p class="muted">支持一次选择多个文件，或选择一个目录递归扫描（最多 500 个文件，单个不超过 2MB）。支持 Xshell .xsh（INI/XML）、SecureCRT .ini、OpenShell JSON，并识别协议类型。</p>
+      <div class="batch-toolbar">
+        <button id="btn-bi-files">选择多个文件</button>
+        <button id="btn-bi-dir">选择目录（递归）</button>
+        <button id="btn-bi-clear" class="danger">清空列表</button>
+        <span class="spacer"></span>
+        <span id="bi-count" class="muted">尚未添加文件</span>
+      </div>
+      <div id="bi-list" class="batch-list"></div>
+      <div class="batch-options">
+        <label class="check"><input id="bi-dedupe" type="checkbox" checked /> 跳过重复会话（主机 + 端口 + 用户名）</label>
+        <label class="check"><input id="bi-group-override" type="checkbox" /> 统一分组为</label>
+        <input id="bi-group-name" type="text" placeholder="留空则保留来源分组" disabled />
+      </div>
+      <div id="bi-summary" class="muted">第三方客户端密码为私有加密，无法还原，导入后需重新填写。</div>
+      <div class="modal-foot">
+        <button id="btn-bi-do" class="primary">导入选中文件</button>
+        <span class="spacer"></span>
+        <button class="cancel">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 批量导出 -->
+  <div id="batch-export-modal" class="modal hidden">
+    <div class="modal-box wide">
+      <div class="modal-head"><h3>批量导出会话</h3><button class="modal-close">×</button></div>
+      <p class="muted">点击“开始导出”时会弹出目录选择框，请手动确认保存位置。第三方格式不写入密码。</p>
+      <div class="batch-options">
+        <label class="check"><input id="opt-include-password-batch" type="checkbox" checked /> OpenShell JSON 导出密码（用主密码加密；取消勾选则清除密码）</label>
+      </div>
+      <div class="batch-options">
+        <label class="check"><input id="be-all" type="checkbox" checked /> 全部会话</label>
+        <label>仅分组<select id="be-group"><option value="">（全部分组）</option></select></label>
+      </div>
+      <div class="form-grid">
+        <label class="check"><input id="be-fmt-openshell" type="checkbox" checked /> OpenShell JSON（合并为单文件）</label>
+        <label class="check"><input id="be-fmt-xshell" type="checkbox" checked /> Xshell（每个会话一个 .xsh）</label>
+        <label class="check"><input id="be-fmt-securecrt" type="checkbox" checked /> SecureCRT（每个会话一个 .ini）</label>
+        <label class="check"><input id="be-subdir" type="checkbox" checked /> 按格式建立子目录</label>
+      </div>
+      <div class="batch-toolbar">
+        <label class="path-label">默认目录<input id="be-dir" type="text" /></label>
+        <button id="btn-be-pick">选择默认目录</button>
+      </div>
+      <div id="be-summary" class="muted">准备就绪。</div>
+      <div class="modal-foot">
+        <button id="btn-be-do" class="primary">开始导出（选择目录）</button>
+        <button id="btn-be-open">打开默认目录</button>
+        <span class="spacer"></span>
+        <button class="cancel">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 功能兼容对照 -->
+  <div id="compare-modal" class="modal hidden">
+    <div class="modal-box wide">
+      <div class="modal-head"><h3>与 Xshell / SecureCRT 功能对照</h3><button class="modal-close">×</button></div>
+      <p class="muted">按公开产品文档与常见配置格式整理，仅供选型参考，不代表逐版本精确核对。</p>
+      <div class="compare-scroll">
+        <table class="compare-table">
+          <thead><tr><th>功能类别</th><th>OpenShell 1.4</th><th>Xshell 8</th><th>SecureCRT 9</th></tr></thead>
+          <tbody>
+            <tr><td>SSH 终端</td><td class="yes">支持（密码 / 私钥）</td><td class="yes">支持</td><td class="yes">支持</td></tr>
+            <tr><td>Telnet</td><td class="yes">支持（自动登录可选）</td><td class="yes">支持</td><td class="yes">支持</td></tr>
+            <tr><td>SFTP 文件传输</td><td class="yes">支持（独立模式 / 面板）</td><td class="yes">支持</td><td class="yes">支持</td></tr>
+            <tr><td>原始 TCP / 串口</td><td class="yes">原始 TCP / Web 串口</td><td class="yes">Rlogin / 串口</td><td class="yes">串口 /  RAW</td></tr>
+            <tr><td>会话导入</td><td class="yes">Xshell .xsh、SecureCRT .ini、自有 JSON</td><td class="part">仅自有格式</td><td class="part">仅自有格式</td></tr>
+            <tr><td>会话导出</td><td class="yes">三种格式互转，不写密码</td><td class="part">自有格式</td><td class="part">自有格式</td></tr>
+            <tr><td>批量导入 / 导出</td><td class="yes">多文件 / 目录递归</td><td class="part">会话管理器集中管理</td><td class="part">会话管理器集中管理</td></tr>
+            <tr><td>凭据加密</td><td class="yes">系统级加密（safeStorage）</td><td class="part">私有加密</td><td class="part">私有加密</td></tr>
+            <tr><td>主机密钥校验</td><td class="yes">首次连接指纹确认</td><td class="yes">支持</td><td class="yes">支持</td></tr>
+            <tr><td>端口转发 / 脚本</td><td class="yes">本地转发 / 逐行发送</td><td class="yes">支持</td><td class="yes">支持</td></tr>
+            <tr><td>主题与界面</td><td class="yes">深空蓝 / 浅色 / Solarized</td><td class="yes">多主题</td><td class="yes">多主题</td></tr>
+            <tr><td>注册与有效期</td><td class="yes">无需注册，无有效期</td><td class="part">个人免费 / 商用授权</td><td class="part">商业授权</td></tr>
+            <tr><td>许可证</td><td class="yes">MIT 开源</td><td class="part">专有软件</td><td class="part">专有软件</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="modal-foot"><span class="spacer"></span><button class="cancel">关闭</button></div>
+    </div>
+  </div>
+
+  <!-- 设置 -->
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-box small">
+      <div class="modal-head"><h3>设置</h3><button class="modal-close">×</button></div>
+      <div class="form-grid">
+        <label>主题
+          <select id="s-theme">
+            <option value="dark">深空蓝（默认）</option>
+            <option value="light">浅色</option>
+            <option value="solarized">Solarized Dark</option>
+          </select>
+        </label>
+        <label>字体大小<input id="s-fontsize" type="number" value="14" min="10" max="24" /></label>
+        <label>回滚行数<input id="s-scrollback" type="number" value="5000" min="1000" max="50000" /></label>
+      </div>
+      <div class="modal-foot"><span class="spacer"></span><button id="btn-settings-save" class="primary">保存</button></div>
+    </div>
+  </div>
+
+  <!-- 端口转发 -->
+  <div id="forward-modal" class="modal hidden">
+    <div class="modal-box small">
+      <div class="modal-head"><h3>本地端口转发</h3><button class="modal-close">×</button></div>
+      <p class="muted">规则保存到本地；连接建立时自动尝试，断开时自动释放。需要目标服务器允许 TCP 转发。</p>
+      <div class="form-grid">
+        <label>本地端口<input id="fw-local" type="number" placeholder="8080" min="1" max="65535" /></label>
+        <label>远程主机<input id="fw-host" type="text" placeholder="127.0.0.1" /></label>
+        <label>远程端口<input id="fw-remote" type="number" placeholder="80" min="1" max="65535" /></label>
+      </div>
+      <div id="fw-list" class="fw-list"></div>
+      <div class="modal-foot"><button id="btn-fw-add" class="primary">添加规则</button><span class="spacer"></span><button class="cancel">关闭</button></div>
+    </div>
+  </div>
+
+  <!-- 脚本 -->
+  <div id="script-modal" class="modal hidden">
+    <div class="modal-box small">
+      <div class="modal-head"><h3>脚本发送</h3><button class="modal-close">×</button></div>
+      <p class="muted">逐行发送到当前终端，不解析执行结果。发送过程中可点击“停止发送”中断。</p>
+      <textarea id="script-text" rows="10" placeholder="每行一条命令，例如：&#10;cd /var/log&#10;tail -n 50 syslog"></textarea>
+      <label>行间隔（毫秒）<input id="script-delay" type="number" value="300" min="50" /></label>
+      <div class="modal-foot"><button id="btn-script-run" class="primary">发送到当前终端</button><span class="spacer"></span><button class="cancel">关闭</button></div>
+    </div>
+  </div>
+
+  <!-- 主密码设置 -->
+  <div id="master-modal" class="modal hidden">
+    <div class="modal-box small">
+      <div class="modal-head"><h3>主密码设置</h3><button class="modal-close">×</button></div>
+      <p class="muted">主密码用于加密导出会话中的密码。只有主密码相同的电脑才能导入并还原密码。主密码本身仅保存校验串，不会明文存储，也无法找回，请牢记。</p>
+      <div id="master-status" class="muted">检查中…</div>
+      <div class="form-grid">
+        <label>新主密码（至少 4 位）<input id="mp-new" type="password" autocomplete="new-password" /></label>
+        <label>确认新主密码<input id="mp-confirm" type="password" autocomplete="new-password" /></label>
+      </div>
+      <div class="modal-foot">
+        <button id="btn-master-save" class="primary">设置 / 修改主密码</button>
+        <button id="btn-master-clear" class="danger">清除主密码</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Linux 命令查询 -->
+  <div id="linux-modal" class="modal hidden">
+    <div class="modal-box wide">
+      <div class="modal-head"><h3>Linux 命令查询</h3><button class="modal-close">×</button></div>
+      <p class="muted">内置常用 Linux 命令的中文说明、语法、参数与示例，可离线查询。支持按命令名、功能、分类搜索。</p>
+      <div class="linux-search-row">
+        <select id="linux-category"><option value="">全部分类</option></select>
+        <input id="linux-search" type="search" placeholder="输入命令名或功能关键词，如 grep、磁盘、压缩…" />
+        <span id="linux-count" class="muted"></span>
+      </div>
+      <div id="linux-list" class="linux-list"></div>
+      <div class="modal-foot"><span class="spacer"></span><button class="cancel">关闭</button></div>
+    </div>
+  </div>
+
+  <!-- 下发配置到交换机 -->
+  <div id="deploy-modal" class="modal hidden">
+    <div class="modal-box small">
+      <div class="modal-head"><h3>下发配置到交换机</h3><button class="modal-close">×</button></div>
+      <p class="muted">从“网络拓扑与配置生成”生成配置后，粘贴到此处，选择已有的 SSH 会话作为目标，一键下发（自动进入 system-view、下发后 save）。请确认会话凭据已保存。</p>
+      <label>目标会话<select id="deploy-session"></select></label>
+      <textarea id="deploy-text" rows="12" placeholder="在此粘贴交换机配置命令，例如：&#10;system-view&#10;vlan batch 10 20&#10;interface GigabitEthernet0/0/1&#10;port link-type access&#10;port default vlan 10"></textarea>
+      <div class="modal-foot">
+        <button id="btn-deploy-do" class="primary">下发并保存配置</button>
+        <span class="spacer"></span><button class="cancel">关闭</button>
+      </div>
+      <div id="deploy-result" class="muted"></div>
+    </div>
+  </div>
+
+  <input id="upload-file" type="file" class="hidden" multiple />
+  <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
+  <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+  <script src="session-format.js"></script>
+  <script src="data/linux-commands.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
