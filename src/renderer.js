@@ -168,6 +168,7 @@ function makeTerminal(tab) {
     fontFamily: 'Consolas, "Cascadia Mono", Menlo, monospace',
     scrollback: getPrefs().scrollback || 5000,
     cursorBlink: true,
+    rightClickSelectsWord: false,
     theme: terminalTheme(getPrefs().theme)
   });
   const fit = new FitAddon();
@@ -179,6 +180,74 @@ function makeTerminal(tab) {
   });
   tab.term = term;
   tab.fit = fit;
+
+  // 终端右键菜单：复制/粘贴/全选/清屏/重连
+  term.element.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    activateTab(tab.id);
+    const menu = $('term-context-menu');
+    menu.dataset.tabId = tab.id;
+    // 有选中内容时"复制选中"可用，否则禁用提示
+    const hasSel = !!term.getSelection();
+    const copyBtn = menu.querySelector('[data-action="copy"]');
+    copyBtn.style.opacity = hasSel ? '1' : '0.5';
+    showTermMenu(e.clientX, e.clientY);
+  });
+
+  // 键盘快捷键（在终端内生效）：
+  // Ctrl+Shift+C 复制选中；Ctrl+Shift+V 粘贴；Ctrl+Shift+A 全选
+  term.element.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey && e.shiftKey)) return;
+    const k = e.key.toLowerCase();
+    if (k === 'c') { e.preventDefault(); e.stopPropagation(); copyTermSelection(tab); }
+    else if (k === 'v') { e.preventDefault(); e.stopPropagation(); pasteToTerm(tab); }
+    else if (k === 'a') { e.preventDefault(); e.stopPropagation(); term.selectAll(); }
+  });
+
+  // 选中即复制（可选习惯）：监听选择变化，有内容时自动写入剪贴板
+  try {
+    term.onSelectionChange(() => {
+      if (!getPrefs().copyOnSelect) return;
+      const sel = term.getSelection();
+      if (sel) api.writeClipboard(sel).catch(() => {});
+    });
+  } catch (_) {}
+}
+
+/* 终端右键菜单显示/隐藏 */
+function showTermMenu(x, y) {
+  const menu = $('term-context-menu');
+  menu.classList.remove('hidden');
+  const w = menu.offsetWidth || 160, h = menu.offsetHeight || 200;
+  const px = Math.min(x, window.innerWidth - w - 8);
+  const py = Math.min(y, window.innerHeight - h - 8);
+  menu.style.left = Math.max(4, px) + 'px';
+  menu.style.top = Math.max(4, py) + 'px';
+}
+function hideTermMenu() { $('term-context-menu').classList.add('hidden'); }
+
+/* 复制终端选中内容 */
+async function copyTermSelection(tab) {
+  const t = tab || currentTab();
+  if (!t || !t.term) { status('当前没有终端'); return; }
+  const sel = t.term.getSelection();
+  if (!sel) { status('没有选中内容'); return; }
+  try { await api.writeClipboard(sel); status(`已复制 ${sel.length} 个字符`); }
+  catch (e) { status('复制失败：' + (e.message || e)); }
+}
+
+/* 粘贴到当前终端（按标签类型选择通道） */
+async function pasteToTerm(tab) {
+  const t = tab || currentTab();
+  if (!t || !t.term) { alert('请先打开一个终端标签。'); return; }
+  let text = '';
+  try { text = await api.readClipboard(); } catch (_) {}
+  if (!text) { status('剪贴板为空'); return; }
+  if (t.type === 'local') api.localWrite(t.id, text);
+  else if (t.ftp) { status('FTP 标签不支持命令粘贴'); return; }
+  else api.sshWrite(t.id, text);
+  t.term.focus();
+  status(`已粘贴 ${text.length} 个字符`);
 }
 function createTab(name, type = 'ssh') {
   const id = `tab-${++tabSeq}`;
@@ -243,9 +312,14 @@ api.on('ssh:data', (tabId, data) => {
   const tab = tabs.get(tabId);
   if (tab && tab.term) tab.term.write(String(data));
 });
-api.on('ssh:close', () => { status('连接已关闭'); });
+api.on('ssh:close', (tabId) => {
+  const tab = tabId ? tabs.get(tabId) : currentTab();
+  if (tab) tab.connState = 'closed';
+  status('连接已关闭');
+});
 api.on('ssh:error', (tabId, message) => {
   const tab = tabs.get(tabId);
+  if (tab) tab.connState = 'failed';
   if (tab && tab.term) tab.term.writeln('\x1b[31m[ERROR] ' + String(message) + '\x1b[0m');
   status('连接失败');
 });
@@ -263,6 +337,66 @@ api.on('sftp:progress', (tabId, name, transferred) => {
 });
 
 /* ---------------- SSH 连接 ---------------- */
+/* 查找可复用的标签：同一会话、且处于失败/断开状态（避免重复开新标签） */
+function findReusableTab(session) {
+  const key = session.id || `${session.protocol}|${session.host}|${session.port}|${session.user}`;
+  for (const tab of tabs.values()) {
+    if (tab.sessionKey !== key) continue;
+    // 只复用失败或已断开的连接标签，正在连接的标签不复用
+    if (tab.connState === 'failed' || tab.connState === 'closed' || tab.connState === 'idle') return tab;
+  }
+  return null;
+}
+
+/* 在指定标签内执行实际连接（SSH/Telnet/RLOGIN/Raw/SFTP） */
+async function connectIntoTab(tab, session, protocol) {
+  const term = tab.term;
+  tab.session = session;
+  tab.sessionKey = session.id || `${protocol}|${session.host}|${session.port}|${session.user}`;
+  tab.connState = 'connecting';
+  let ver = '2.0.0';
+  try { ver = await api.appVersion(); } catch (_) {}
+  const cyan = '\x1b[36m', dim = '\x1b[2m', reset = '\x1b[0m';
+  term.writeln(`${cyan}OpenShell ${ver}${reset} · ${protocol.toUpperCase()}`);
+  term.writeln('Copyright (c) 2026 OpenShell contributors. All rights reserved.');
+  term.writeln('');
+  term.writeln(`${dim}输入 help 查看远程 Shell 的可用命令。${reset}`);
+  term.writeln('');
+  status(`正在连接 ${session.host}`);
+  // 释放旧的数据监听，避免重连后重复绑定导致输入被发送两次
+  if (tab.onDataDisposable) { try { tab.onDataDisposable.dispose(); } catch {} }
+  tab.onDataDisposable = term.onData((data) => api.sshWrite(tab.id, data));
+  const payload = { ...session, protocol, forwardRules: getForwarding() };
+  try {
+    if (['telnet', 'raw', 'rlogin'].includes(protocol)) await api.telnetConnect(tab.id, payload);
+    else await api.sshConnect(tab.id, payload);
+    tab.connState = 'connected';
+    term.writeln('\x1b[32m连接成功。\x1b[0m');
+    if (protocol === 'sftp') {
+      setTimeout(() => {
+        if (tabs.has(tab.id) && $('sftp-panel').classList.contains('hidden')) toggleSftp();
+      }, 700);
+    }
+  } catch (e) {
+    tab.connState = 'failed';
+    // xterm 是终端渲染器而非 HTML，不做 HTML 转义（会显示成 &lt; 字面量）
+    term.writeln('\x1b[31m[连接失败] ' + String(e && e.message ? e.message : e) + '\x1b[0m');
+    term.writeln('\x1b[33m可在本标签右键选择“重新连接”，或从左侧会话列表再次连接（将在原标签重试）。\x1b[0m');
+    status('连接失败');
+  }
+}
+
+/* 在原标签重新连接 */
+async function reconnectTab(tab, session) {
+  if (!tab || !tabs.has(tab.id)) return;
+  const protocol = Fmt.normalizeProtocol((session || tab.session || {}).protocol);
+  // 清屏并停止旧数据监听，然后复用本标签重连
+  if (tab.onDataDisposable) { try { tab.onDataDisposable.dispose(); } catch {} tab.onDataDisposable = null; }
+  try { api.sshDisconnect(tab.id); } catch {}
+  if (tab.term) tab.term.clear();
+  await connectIntoTab(tab, session || tab.session, protocol);
+}
+
 async function connectSession(session) {
   const protocol = Fmt.normalizeProtocol(session.protocol);
   // RDP 是图形协议，无法在终端渲染，调用系统远程桌面客户端
@@ -280,56 +414,53 @@ async function connectSession(session) {
   if (protocol === 'local') {
     const tab = createTab('本地终端', 'local');
     tab.protocol = 'local';
+    tab.session = session;
+    tab.connState = 'idle';
     const term = tab.term;
     term.writeln('\x1b[36mOpenShell 网络版 · 本地终端\x1b[0m');
     term.writeln('\x1b[2m输入 exit 退出；本地终端直接在你的电脑上执行命令。\x1b[0m\r\n');
     status('正在启动本地终端…');
     tab.onDataDisposable = term.onData((data) => api.localWrite(tab.id, data));
-    try { await api.localSpawn(tab.id); }
-    catch (e) { term.writeln('\x1b[31m[启动失败] ' + String(e && e.message ? e.message : e) + '\x1b[0m'); status('启动失败'); }
+    try { await api.localSpawn(tab.id); tab.connState = 'connected'; }
+    catch (e) { tab.connState = 'failed'; term.writeln('\x1b[31m[启动失败] ' + String(e && e.message ? e.message : e) + '\x1b[0m'); status('启动失败'); }
     return;
   }
   // FTP：建立控制连接，文件列表通过 FTP 面板呈现
   if (protocol === 'ftp') {
     const tab = createTab(session.name || `${session.user}@${session.host}`, 'ftp');
     tab.protocol = 'ftp';
+    tab.session = session;
+    tab.sessionKey = session.id || `ftp|${session.host}|${session.port}|${session.user}`;
+    tab.connState = 'connecting';
     const term = tab.term;
     term.writeln('\x1b[36mOpenShell 网络版 · FTP\x1b[0m');
     term.writeln('\x1b[2mFTP 为文件传输协议，双击会话后可在文件面板列出远程目录。\x1b[0m\r\n');
     status(`正在连接 FTP ${session.host}`);
     try {
       await api.ftpConnect(tab.id, { ...session, protocol });
+      tab.connState = 'connected';
       term.writeln('\x1b[32mFTP 已连接。点击工具栏“文件”查看远程目录。\x1b[0m');
-    } catch (e) { term.writeln('\x1b[31m[连接失败] ' + String(e && e.message ? e.message : e) + '\x1b[0m'); status('连接失败'); }
+    } catch (e) {
+      tab.connState = 'failed';
+      term.writeln('\x1b[31m[连接失败] ' + String(e && e.message ? e.message : e) + '\x1b[0m');
+      term.writeln('\x1b[33m可在本标签右键选择“重新连接”重试。\x1b[0m');
+      status('连接失败');
+    }
     return;
   }
-  const tab = createTab(session.name || `${session.user}@${session.host}`, 'ssh');
-  tab.protocol = protocol;
-  const term = tab.term;
-  let ver = '2.0.0';
-  try { ver = await api.appVersion(); } catch (_) {}
-  const cyan = '\x1b[36m', dim = '\x1b[2m', reset = '\x1b[0m';
-  term.writeln(`${cyan}OpenShell ${ver}${reset} · ${protocol.toUpperCase()}`);
-  term.writeln('Copyright (c) 2026 OpenShell contributors. All rights reserved.');
-  term.writeln('');
-  term.writeln(`${dim}输入 help 查看远程 Shell 的可用命令。${reset}`);
-  term.writeln('');
-  status(`正在连接 ${session.host}`);
-  tab.onDataDisposable = term.onData((data) => api.sshWrite(tab.id, data));
-  const payload = { ...session, protocol, forwardRules: getForwarding() };
-  try {
-    if (['telnet', 'raw', 'rlogin'].includes(protocol)) await api.telnetConnect(tab.id, payload);
-    else await api.sshConnect(tab.id, payload);
-    if (protocol === 'sftp') {
-      setTimeout(() => {
-        if (tabs.has(tab.id) && $('sftp-panel').classList.contains('hidden')) toggleSftp();
-      }, 700);
-    }
-  } catch (e) {
-    // xterm 是终端渲染器而非 HTML，不能做 HTML 转义（会显示成 &lt; 字面量）
-    term.writeln('\x1b[31m[连接失败] ' + String(e && e.message ? e.message : e) + '\x1b[0m');
-    status('连接失败');
+  // SSH / Telnet / RLOGIN / Raw / SFTP：优先复用同会话的失败/断开标签
+  let tab = findReusableTab(session);
+  let reused = false;
+  if (tab) {
+    reused = true;
+    activateTab(tab.id);
+    if (tab.term) tab.term.clear();
+  } else {
+    tab = createTab(session.name || `${session.user}@${session.host}`, 'ssh');
   }
+  tab.protocol = protocol;
+  if (reused) status(`正在原标签重新连接 ${session.host}`);
+  await connectIntoTab(tab, session, protocol);
 }
 
 /* ---------------- SFTP ---------------- */
@@ -485,6 +616,7 @@ function openSettings() {
   $('s-theme').value = p.theme;
   $('s-fontsize').value = p.fontSize;
   $('s-scrollback').value = p.scrollback;
+  if ($('s-copyonselect')) $('s-copyonselect').checked = !!p.copyOnSelect;
   $('settings-modal').classList.remove('hidden');
 }
 
@@ -859,11 +991,37 @@ $('session-tree').addEventListener('contextmenu', (e) => {
   menu.style.top = Math.min(e.clientY, window.innerHeight - 160) + 'px';
   menu.classList.remove('hidden');
 });
-document.addEventListener('click', () => $('context-menu').classList.add('hidden'));
+document.addEventListener('click', () => {
+  $('context-menu').classList.add('hidden');
+  $('term-context-menu').classList.add('hidden');
+});
 document.addEventListener('contextmenu', (e) => {
   if (!e.target.closest('.session-item') && !e.target.closest('#context-menu')) {
     $('context-menu').classList.add('hidden');
   }
+  // 终端右键菜单：点击非菜单、非终端区域时关闭
+  if (!e.target.closest('#term-context-menu') && !e.target.closest('.xterm')) {
+    $('term-context-menu').classList.add('hidden');
+  }
+});
+document.querySelectorAll('#term-context-menu button[data-action]').forEach((btn) => {
+  btn.onclick = async (e) => {
+    e.stopPropagation();
+    const tabId = $('term-context-menu').dataset.tabId;
+    const tab = tabs.get(tabId) || currentTab();
+    const action = btn.dataset.action;
+    hideTermMenu();
+    if (!tab) { alert('当前没有终端标签。'); return; }
+    if (action === 'copy') copyTermSelection(tab);
+    else if (action === 'paste') pasteToTerm(tab);
+    else if (action === 'select-all') { try { tab.term.selectAll(); tab.term.focus(); } catch {} }
+    else if (action === 'clear') { if (tab.term) { tab.term.clear(); status('当前终端已清空'); } }
+    else if (action === 'reconnect') {
+      const s = tab.session;
+      if (s) reconnectTab(tab, s);
+      else { closeTab(tab.id); alert('该标签没有关联会话，请从左侧会话列表重新连接。'); }
+    }
+  };
 });
 document.querySelectorAll('#context-menu button[data-action]').forEach((btn) => {
   btn.onclick = async (e) => {
@@ -1026,7 +1184,8 @@ $('btn-settings-save').onclick = () => {
   saveJSON(PREFS_KEY, {
     theme: $('s-theme').value,
     fontSize: Math.min(24, Math.max(10, Number($('s-fontsize').value) || 14)),
-    scrollback: Math.min(50000, Math.max(1000, Number($('s-scrollback').value) || 5000))
+    scrollback: Math.min(50000, Math.max(1000, Number($('s-scrollback').value) || 5000)),
+    copyOnSelect: $('s-copyonselect') ? $('s-copyonselect').checked : false
   });
   applyPrefs();
   $('settings-modal').classList.add('hidden');

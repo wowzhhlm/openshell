@@ -10,7 +10,7 @@
   },
   "scripts": {
     "start": "electron .",
-    "test": "node test-format.js && node test-telnet.js && node test-features.js",
+    "test": "node test-format.js && node test-telnet.js && node test-features.js && node test-vault.js && node test-kex.js",
     "dist": "electron-builder --win --dir --x64 --publish never",
     "dist:installer": "electron-builder --win --x64 --publish never"
   },

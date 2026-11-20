@@ -205,6 +205,16 @@
     <button data-action="delete" class="danger">删除会话</button>
   </div>
 
+  <!-- 终端右键菜单 -->
+  <div id="term-context-menu" class="context-menu hidden">
+    <button data-action="copy">复制选中</button>
+    <button data-action="paste">粘贴</button>
+    <button data-action="select-all">全选</button>
+    <hr />
+    <button data-action="clear">清空终端</button>
+    <button data-action="reconnect">重新连接</button>
+  </div>
+
   <!-- 批量导入 -->
   <div id="batch-import-modal" class="modal hidden">
     <div class="modal-box wide">
@@ -307,7 +317,9 @@
         </label>
         <label>字体大小<input id="s-fontsize" type="number" value="14" min="10" max="24" /></label>
         <label>回滚行数<input id="s-scrollback" type="number" value="5000" min="1000" max="50000" /></label>
+        <label class="check"><input id="s-copyonselect" type="checkbox" /> 鼠标选中即复制</label>
       </div>
+      <p class="muted">终端操作：右键菜单可复制/粘贴/全选/重连；快捷键 Ctrl+Shift+C 复制、Ctrl+Shift+V 粘贴、Ctrl+Shift+A 全选。</p>
       <div class="modal-foot"><span class="spacer"></span><button id="btn-settings-save" class="primary">保存</button></div>
     </div>
   </div>

@@ -5,8 +5,22 @@ const path = require('path');
 const net = require('net');
 const { spawn } = require('child_process');
 const { Client } = require('ssh2');
+const SSH_CONST = require('ssh2/lib/protocol/constants');
 const Vault = require('./vault');
 const FTP = require('./ftp');
+
+// 构建"现代优先 + 兼容旧设备"的算法列表：直接使用 ssh2 官方 SUPPORTED 全集，
+// 把旧算法（group14-sha1 / group1-sha1 / cbc / 3des / ssh-rsa / ssh-dss）也纳入，
+// 解决老服务器 "no matching key exchange algorithm / cipher / host key" 握手失败。
+function uniq(list) { return [...new Set(list.filter(Boolean))]; }
+const KEX_LIST = uniq([...(SSH_CONST.DEFAULT_KEX || []), ...(SSH_CONST.SUPPORTED_KEX || [])]);
+const CIPHER_LIST = uniq([...(SSH_CONST.DEFAULT_CIPHER || []), ...(SSH_CONST.SUPPORTED_CIPHER || [])]);
+const HOSTKEY_LIST = uniq([...(SSH_CONST.DEFAULT_SERVER_HOST_KEY || []), ...(SSH_CONST.SUPPORTED_SERVER_HOST_KEY || [])]);
+const HMAC_LIST = [
+  'hmac-sha2-256-etm@openssh.com', 'hmac-sha2-512-etm@openssh.com',
+  'hmac-sha2-256', 'hmac-sha2-512', 'hmac-sha1', 'hmac-sha1-etm@openssh.com',
+  'hmac-md5', 'hmac-md5-etm@openssh.com'
+];
 
 let mainWindow = null;
 const tabs = new Map();
@@ -499,6 +513,12 @@ ipcMain.handle('ssh:connect', async (_event, tabId, session) => {
     readyTimeout: 20000,
     keepaliveInterval: 10000,
     hostHash: 'sha256',
+    // 显式声明算法列表：默认安全算法在前优先协商，兼容旧设备的算法在后兜底，
+    // 解决 "no matching key exchange algorithm" / "no matching cipher" 握手失败。
+    kex: KEX_LIST,
+    ciphers: CIPHER_LIST,
+    hmac: HMAC_LIST,
+    serverHostKey: HOSTKEY_LIST,
     hostVerifier: (hex, callback) => {
       send('ssh:progress', tabId, '正在验证主机密钥…');
       verifyHostKey(cfg.host + ':' + cfg.port, hex).then((ok) => {
