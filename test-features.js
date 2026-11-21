@@ -58,9 +58,34 @@ console.log('PASS: FTP 客户端接口');
 // --- Linux 命令数据 ---
 global.window = global;
 require('./src/data/linux-commands');
-assert(global.LINUX_COMMANDS.commands.length > 50);
-assert(global.LINUX_COMMANDS.categories.length > 5);
-console.log('PASS: Linux 命令库数据 ' + global.LINUX_COMMANDS.commands.length + ' 条');
+const LC = global.LINUX_COMMANDS;
+assert(LC.commands.length >= 200, '命令库应覆盖 200+ 条常用命令');
+assert(LC.categories.length >= 15, '分类应覆盖 15+ 个运维场景');
+// 关键命令不得遗漏（用户反馈 tcpdump 曾缺失，逐类设哨兵防回归）
+['tcpdump', 'tshark', 'nmap', 'nc', 'iperf3', 'mtr', 'ethtool',
+ 'iptables', 'ssh-keygen', 'openssl', 'lsblk', 'dd', 'lvextend',
+ 'journalctl', 'dmesg', 'lastb', 'sar', 'strace', 'perf',
+ 'docker', 'kubectl', 'helm', 'rsync', 'rclone', 'jq', 'xargs',
+ 'tmux', 'sysctl', 'apt', 'dnf', 'pip', 'lsof'].forEach((k) => {
+  assert(LC.commands.some((x) => x.cmd === k), '缺少关键命令：' + k);
+});
+// 分类列表必须与每条命令实际使用的分类完全一致（下拉框由它动态生成）
+const catSet = [...new Set(LC.commands.map((x) => x.category))].sort();
+assert.deepStrictEqual([...LC.categories].sort(), catSet, '分类列表与命令分类不一致');
+// 字段完整性 + 无重复命令名
+const seen = new Set();
+LC.commands.forEach((x) => {
+  assert(x.cmd && x.name && x.category && x.desc && x.usage, '字段缺失：' + x.cmd);
+  assert(Array.isArray(x.examples) && x.examples.length, '示例缺失：' + x.cmd);
+  assert(Array.isArray(x.options), 'options 必须是数组：' + x.cmd);
+  assert(!seen.has(x.cmd), '重复命令：' + x.cmd);
+  seen.add(x.cmd);
+});
+const td = LC.commands.find((x) => x.cmd === 'tcpdump');
+assert(td.category === '网络诊断与抓包' && td.options.length >= 10 && td.examples.length >= 8,
+  'tcpdump 抓包条目应保持详尽');
+console.log('PASS: Linux 命令库数据 ' + LC.commands.length + ' 条 / ' + LC.categories.length +
+  ' 分类（含 tcpdump 等关键命令，字段与分类一致性校验通过）');
 
 // --- 会话高级参数：串口 / RLOGIN / RDP / 保持活动 / 日志 ---
 const D = Fmt.optionDefaults({});

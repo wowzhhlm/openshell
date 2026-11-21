@@ -4,7 +4,7 @@ const fsp = require('fs/promises');
 const path = require('path');
 const net = require('net');
 const os = require('os');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const { Client } = require('ssh2');
 const SSH_CONST = require('ssh2/lib/protocol/constants');
 const Vault = require('./vault');
@@ -133,7 +133,7 @@ function writeSessionLog(tabId, text, meta) {
   const out = lines.map((l) => (cfg.timestamp ? '[' + now + '] ' : '') + l).join(os.EOL) + os.EOL;
   try { fs.appendFileSync(st.file, out, 'utf8'); } catch {}
 }
-function endLog(tabId) {
+function endLog(tabId, tail) {
   const key = String(tabId || '');
   const st = logStates.get(key);
   if (!st) return;
@@ -143,7 +143,9 @@ function endLog(tabId) {
         (st.cfg.timestamp ? '[' + logStamp(new Date()) + '] ' : '') + stripAnsi(st.buffer) + os.EOL, 'utf8');
     } catch {}
   }
-  try { fs.appendFileSync(st.file, '===== 连接结束 ' + logStamp(new Date()) + ' =====' + os.EOL, 'utf8'); } catch {}
+  // RDP 等由外部客户端运行的协议可传入自定义尾行，避免默认「连接结束」被误读为连接失败
+  const endText = tail || ('===== 连接结束 ' + logStamp(new Date()) + ' =====');
+  try { fs.appendFileSync(st.file, endText + os.EOL, 'utf8'); } catch {}
   logStates.delete(key);
 }
 
@@ -1145,17 +1147,51 @@ ipcMain.on('ftp:close', (_event, tabId) => {
   if (tabs.get(tabId) === tab) tabs.delete(tabId);
 });
 
+/* ---------------- 枚举系统真实串口（会话表单「端口号」下拉数据源） ----------------
+   Windows 下 HKLM\HARDWARE\DEVICEMAP\SERIALCOMM 登记了全部已枚举的 COM 口
+   （含主板串口与 USB 转串口）。没有设备 / 非 Windows / 查询失败都返回空数组，
+   前端下拉框即「无可选项」，不再让用户手填并不存在的 COM1..COM20。 */
+function listWindowsSerialPorts() {
+  const ids = new Set();
+  try {
+    const out = execFileSync('reg',
+      ['query', 'HKLM\\HARDWARE\\DEVICEMAP\\SERIALCOMM', '/s'],
+      { encoding: 'utf8', timeout: 5000, windowsHide: true });
+    String(out || '').split(/\r?\n/).forEach((line) => {
+      const m = line.match(/REG_SZ\s+(COM\d+)/i);
+      if (m) ids.add(m[1].toUpperCase());
+    });
+  } catch {}
+  return [...ids]
+    .sort((a, b) => parseInt(a.slice(3), 10) - parseInt(b.slice(3), 10))
+    .map((id) => ({ id, label: id }));
+}
+ipcMain.handle('serial:listPorts', async () => {
+  try { return { ok: true, ports: process.platform === 'win32' ? listWindowsSerialPorts() : [] }; }
+  catch (e) { return { ok: false, error: e.message, ports: [] }; }
+});
+
 /* ---------------- RDP：生成 .rdp 配置文件后调用系统远程桌面客户端 ----------------
    参照 Xshell「Connection > RDP」：窗口大小、智能重新连接、缩放、颜色质量、
    密钥组合、驱动器共享、远程音频、录制、Windows 身份验证。
-   不写入明文密码；连接时由系统客户端提示凭据。 */
+   不写入明文密码；连接时由系统客户端提示凭据。
+   缺陷复查修复：
+   1) 之前 spawn('mstsc') 的 error 被静默吞掉、未验证启动结果就返回 ok:true，
+      日志还立刻写「连接结束」，造成「假成功 / 被误读为连接失败」；现等待
+      error / exit 并把真实结果回报给界面；
+   2) enablecredsspsupport 曾被 windowsAuth 反转，勾选「Windows 身份验证」会
+      禁用 NLA，遇到要求网络级别身份验证的服务器必然连不上；现始终启用 CredSSP；
+   3) 之前 RDP 会话在 UI 里连用户名都被隐藏，.rdp 的 username 永远为空；
+      现允许填写用户名，并显式写出 host:port；
+   4) .rdp 改用微软官方的 UTF-16LE + BOM，保证中文用户名也能被正确解析。 */
 ipcMain.handle('rdp:launch', async (_event, session) => {
-  const host = String(session.host || '').trim();
-  const port = Number(session.port) || 3389;
+  const s = session || {};
+  const host = String(s.host || '').trim();
+  const port = Number(s.port) || 3389;
   if (!host) return { ok: false, error: '请填写主机地址' };
   if (process.platform !== 'win32') return { ok: false, error: 'RDP 一键启动仅支持 Windows，请手动使用远程桌面客户端连接 ' + host + ':' + port };
-  const target = port === 3389 ? host : `${host}:${port}`;
-  const rdp = Fmt.optionDefaults(session).params.rdp;
+  const target = host + ':' + port;   // 显式端口，避免网关 / 非默认端口解析差异
+  const rdp = Fmt.optionDefaults(s).params.rdp;
   const work = (() => {
     try { return screen.getPrimaryDisplay().workAreaSize || { width: 1920, height: 1080 }; }
     catch { return { width: 1920, height: 1080 }; }
@@ -1165,9 +1201,10 @@ ipcMain.handle('rdp:launch', async (_event, session) => {
   else if (rdp.windowMode === 'custom') { w = rdp.width; h = rdp.height; }
   const audioMap = { noplay: 2, local: 0, remote: 1 };
   const audio = Object.prototype.hasOwnProperty.call(audioMap, rdp.audioMode) ? audioMap[rdp.audioMode] : 2;
+  const user = String(s.user || '');
   const lines = [
     'full address:s:' + target,
-    'username:s:' + String(session.user || ''),
+    'username:s:' + user,
     'screen mode id:i:' + screenMode,
     'desktopwidth:i:' + Math.round(w),
     'desktopheight:i:' + Math.round(h),
@@ -1179,8 +1216,8 @@ ipcMain.handle('rdp:launch', async (_event, session) => {
     'drivestoredirect:s:' + (rdp.shareDrives ? '*' : ''),
     'audiomode:i:' + audio,
     'audiocapturemode:i:' + (rdp.recordAudio ? 1 : 0),
-    'enablecredsspsupport:i:' + (rdp.windowsAuth ? 0 : 1),
-    'authentication level:i:0',
+    'enablecredsspsupport:i:1',
+    'promptcredentialonce:i:' + (rdp.windowsAuth ? 1 : 0),
     'redirectclipboard:i:1',
     'prompt for credentials:i:1',
     ''
@@ -1188,27 +1225,65 @@ ipcMain.handle('rdp:launch', async (_event, session) => {
   let file = '';
   try {
     fs.mkdirSync(CONFIG_DIR, { recursive: true });
-    file = path.join(CONFIG_DIR, 'rdp-' + Fmt.safeName(session.name || host) + '-' + Date.now() + '.rdp');
-    fs.writeFileSync(file, lines.join('\r\n'), 'utf8');
+    file = path.join(CONFIG_DIR, 'rdp-' + Fmt.safeName(s.name || host) + '-' + Date.now() + '.rdp');
+    const text = lines.join('\r\n');
+    fs.writeFileSync(file, Buffer.concat([Buffer.from([0xFF, 0xFE]), Buffer.from(text, 'utf16le')]));
   } catch (e) {
     return { ok: false, error: '写入 RDP 配置失败：' + e.message };
   }
-  // 优先用 mstsc 图形客户端；RDP 是图形协议，无法在终端内渲染
-  spawn('mstsc', [file], { detached: true, windowsHide: false, stdio: 'ignore' }).on('error', () => {});
-  // 连接日志：RDP 由系统客户端运行，仅记录启动事件与所用参数
-  const lg = Fmt.optionDefaults(session).logging;
+
+  // 用绝对路径定位 mstsc.exe，避免 PATH 差异导致「静默启动失败」
+  const windir = process.env.WINDIR || process.env.SystemRoot || 'C:\\Windows';
+  const abs = path.join(windir, 'System32', 'mstsc.exe');
+  const exe = fs.existsSync(abs) ? abs : 'mstsc';
+
+  // 真正等待启动结果：error / 立即退出都要回报给界面，杜绝「假成功」
+  const launch = await new Promise((resolve) => {
+    let child, settled = false;
+    const finish = (r) => { if (settled) return; settled = true; resolve(r); };
+    try {
+      child = spawn(exe, [file], { detached: true, stdio: 'ignore', windowsHide: false });
+    } catch (e) {
+      finish({ ok: false, error: '启动远程桌面客户端失败：' + e.message });
+      return;
+    }
+    child.on('error', (e) => finish({
+      ok: false,
+      error: '启动远程桌面客户端失败：' + e.message + '（请确认系统已安装「远程桌面连接」mstsc.exe）'
+    }));
+    child.on('exit', (code) => {
+      if (code) finish({ ok: false, error: '远程桌面客户端启动后立即退出（代码 ' + code + '），请检查配置文件：' + file });
+    });
+    setTimeout(() => finish({ ok: true }), 900);
+    try { child.unref(); } catch {}
+  });
+
+  // 连接日志：RDP 由系统客户端独立运行，只记录启动参数与启动结果，
+  // 不再写「连接结束」（会被误读为连接失败 / 连接被断开）。
+  const lg = Fmt.optionDefaults(s).logging;
   if (lg.enabled) {
-    const key = 'rdp-' + String(session.id || host) + '-' + Date.now();
+    const key = 'rdp-' + String(s.id || host) + '-' + Date.now();
+    const detail = [
+      '目标：' + target,
+      '用户名：' + (user || '（留空，由远程桌面客户端提示输入）'),
+      '窗口：' + Math.round(w) + 'x' + Math.round(h) + '，' + rdp.colorDepth + 'bit，缩放 ' + rdp.scaling + '%',
+      'NLA(CredSSP)：启用；密钥组合：' + (rdp.applyKeyCombinations ? '远程应用' : '本机应用'),
+      '客户端：' + exe,
+      '配置文件：' + file,
+      '启动结果：' + (launch.ok ? '已成功调起系统「远程桌面连接」窗口' : '失败 - ' + launch.error)
+    ].join(os.EOL + '           ');
     writeSessionLog(key,
-      '已启动远程桌面连接 ' + target + '（' + Math.round(w) + 'x' + Math.round(h) +
-      '，' + rdp.colorDepth + 'bit，缩放 ' + rdp.scaling + '%，配置文件 ' + file + '）' + os.EOL,
-      { session, logging: lg });
-    endLog(key);
+      '已发起远程桌面连接 ' + target + os.EOL + '           ' + detail + os.EOL,
+      { session: s, logging: lg });
+    endLog(key, '===== 启动记录结束 · 远程桌面由系统客户端独立运行，连接过程与结果请在「远程桌面连接」窗口中查看 =====');
   }
+
+  if (!launch.ok) return { ok: false, error: launch.error, file };
   return {
     ok: true,
-    message: '已启动系统远程桌面连接：' + target + '（' + Math.round(w) + 'x' + Math.round(h) + '）',
-    file,
+    message: '已启动系统「远程桌面连接」：' + target + '（' + Math.round(w) + 'x' + Math.round(h) +
+      '）。请在弹出的窗口中输入凭据；openshell 不会在终端内显示远程桌面。',
+    file, target,
     options: { width: Math.round(w), height: Math.round(h), scaling: rdp.scaling, colorDepth: rdp.colorDepth }
   };
 });

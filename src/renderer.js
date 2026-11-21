@@ -307,11 +307,60 @@ function optNum(id, def) { const el = $(id); return el ? (Number(el.value) || de
 function optVal(id, def) { const el = $(id); return el ? el.value : def; }
 function optChk(id, def) { const el = $(id); return el ? !!el.checked : !!def; }
 
+/* 从主进程读取「系统真实存在的串口」填充下拉框。
+   没有设备时下拉框不产生任何 COM 选项（仅一个占位项并禁用），
+   不再让用户手填并不存在的 COM1..COM20。
+   会话里保存过、但当前未检测到的端口号会保留显示并标注，避免丢数据。 */
+async function loadSerialPorts(prefer) {
+  const sel = $('f-serial-port');
+  const hint = $('serial-port-hint');
+  if (!sel) return;
+  const keep = prefer != null ? String(prefer) : (sel.value || '');
+  let ports = [];
+  let err = '';
+  try {
+    const r = await api.listSerialPorts();
+    ports = (r && Array.isArray(r.ports)) ? r.ports : [];
+    if (r && r.ok === false && r.error) err = String(r.error);
+  } catch (e) { err = e.message || String(e); }
+  sel.innerHTML = '';
+  if (!ports.length) {
+    const o = document.createElement('option');
+    o.value = '';
+    o.textContent = '（未检测到可用串口设备）';
+    sel.appendChild(o);
+    if (hint) hint.textContent = '未检测到本机串口设备：下拉框没有可选项。请插入 USB 转串口线/串口设备后点右侧「🔄」刷新。' +
+      (err ? '（检测提示：' + err + '）' : '');
+  } else {
+    ports.forEach((p) => {
+      const o = document.createElement('option');
+      o.value = p.id || '';
+      o.textContent = p.label || p.id;
+      sel.appendChild(o);
+    });
+    if (hint) hint.textContent = '已从系统检测到 ' + ports.length + ' 个串口：' +
+      ports.map((p) => p.id).join('、') + '。插拔设备后可点「🔄」刷新。';
+  }
+  if (keep) {
+    const exists = [...sel.options].some((o) => o.value === keep);
+    if (!exists) {
+      const o = document.createElement('option');
+      o.value = keep;
+      o.textContent = keep + '（当前未检测到）';
+      sel.insertBefore(o, sel.firstChild);
+    }
+    sel.value = keep;
+  }
+  if (!sel.value && sel.options.length) sel.selectedIndex = 0;
+  // 没有设备且会话也没保存过端口时，下拉框彻底禁用，符合「无可选项」
+  sel.disabled = ports.length === 0 && !keep;
+}
+
 function fillSessionOptions(s) {
   const o = Fmt.optionDefaults(s || {});
   const ser = o.params.serial, rl = o.params.rlogin, rdp = o.params.rdp;
   const ka = o.keepalive, lg = o.logging;
-  setOpt('f-serial-port', ser.port);
+  // 端口号由 loadSerialPorts() 按系统实际设备填充，不再写死 COM1
   setOpt('f-serial-baud', ser.baudRate);
   setOpt('f-serial-databits', ser.dataBits);
   setOpt('f-serial-stopbits', ser.stopBits);
@@ -420,6 +469,16 @@ function openSessionModal(id = null) {
   $('btn-session-delete').classList.toggle('hidden', !s);
   fillSessionOptions(s);
   toggleProtocolFields();
+  // 串口「端口号」下拉：先放检测中占位，再用系统实际 COM 口异步填充。
+  // 只有编辑会话且确实保存过端口时才保留该值；新建会话不预设 COM1。
+  const sp = $('f-serial-port');
+  if (sp) {
+    sp.innerHTML = '<option value="">正在检测系统串口…</option>';
+    sp.disabled = true;
+  }
+  const savedSerialPort = (s && s.params && s.params.serial && s.params.serial.port)
+    ? String(s.params.serial.port) : '';
+  loadSerialPorts(savedSerialPort).catch(() => {});
   switchSessionTab('general');
   $('session-modal').classList.remove('hidden');
 }
@@ -434,7 +493,18 @@ function toggleProtocolFields() {
   const p = $('f-protocol').value;
   const isTunnel = ['telnet', 'rlogin', 'raw'].includes(p);
   const noAuth = ['raw', 'local', 'serial', 'rdp'].includes(p);
-  $('lbl-user').classList.toggle('hidden', noAuth);
+  // Serial / Local 是本机连接，不需要主机地址与网络端口：输入框灰色禁用、不可填写
+  const noHostPort = ['serial', 'local'].includes(p);
+  ['f-host', 'f-port'].forEach((id) => {
+    const el = $(id);
+    if (!el) return;
+    el.disabled = noHostPort;
+    const lbl = el.closest('label');
+    if (lbl) lbl.classList.toggle('field-disabled', noHostPort);
+  });
+  // RDP 允许填写用户名（写入 .rdp），密码由系统「远程桌面连接」窗口提示输入
+  const hideUser = ['raw', 'local', 'serial'].includes(p);
+  $('lbl-user').classList.toggle('hidden', hideUser);
   $('lbl-auth').classList.toggle('hidden', isTunnel || noAuth);
   $('lbl-key').classList.toggle('hidden', isTunnel || noAuth || $('f-auth').value !== 'privatekey');
   $('lbl-passphrase').classList.toggle('hidden', isTunnel || noAuth);
@@ -445,9 +515,9 @@ function toggleProtocolFields() {
     rlogin: 'RLOGIN：明文远程登录（RFC 1258），端口 513，安全性低，建议仅在可信网络使用。',
     sftp: 'SFTP：仅打开文件传输面板，不启动交互式 Shell。',
     ftp: 'FTP：传统文件传输协议（端口 21），明文传输，建议仅在可信网络使用。',
-    rdp: 'RDP：Windows 远程桌面图形协议，按「RDP」页参数生成配置后调用系统“远程桌面连接”打开，无法在终端内显示。',
-    serial: 'Serial 串口：通过浏览器 Web Serial API 连接本地 COM 口，请在「串口」页设置端口号、波特率等参数。',
-    local: 'Local 本地终端：在本机启动系统 Shell（Windows 为 cmd），命令直接在本机执行。',
+    rdp: 'RDP：Windows 远程桌面图形协议。可填写用户名，密码由系统「远程桌面连接」窗口提示；按「RDP」页参数生成 .rdp 后调用 mstsc 打开，画面不在终端内显示。',
+    serial: 'Serial 串口：本机 COM 口连接，无需主机地址与端口（已置灰）。请在「串口」页从系统检测到的 COM 口中选择端口号并设置波特率等参数。',
+    local: 'Local 本地终端：在本机启动系统 Shell（Windows 为 cmd），无需主机地址与端口（已置灰），命令直接在本机执行。',
     raw: '原始 TCP：建立裸连接并透传字符，不做 Telnet 选项协商。'
   };
   $('protocol-hint').textContent = hints[p] || hints.ssh;
@@ -840,6 +910,44 @@ async function reconnectTab(tab, session) {
   await connectIntoTab(tab, prepared, protocol);
 }
 
+/* RDP 启动结果展示：远程桌面由系统 mstsc 独立渲染，这里用一个只读标签
+   记录「连接过程 / 启动结果」，避免用户只看到日志里一行启动记录而误判失败。 */
+function showRdpLaunchInfo(session, r) {
+  const key = session.id || (session.host + ':' + session.port);
+  let tab = null;
+  for (const t of tabs.values()) {
+    if (t.type === 'rdp' && t.rdpKey === key) { tab = t; break; }
+  }
+  if (!tab) {
+    tab = createTab('RDP · ' + (session.name || session.host), 'rdp');
+    tab.rdpKey = key;
+    tab.protocol = 'rdp';
+    tab.connState = 'info';   // 不是活动长连接，会话列表「断开」按钮保持禁用
+  } else {
+    try { tab.term.clear(); } catch (_) {}
+    activateTab(tab.id);
+  }
+  tab.session = { ...stripInlineCreds(session), protocol: 'rdp' };
+  const t = tab.term;
+  try { t.options.disableStdin = true; } catch (_) {}
+  const c = '\x1b[36m', g = '\x1b[32m', d = '\x1b[2m', z = '\x1b[0m';
+  t.writeln(c + 'openshell · 远程桌面连接' + z);
+  t.writeln('会话：' + (session.name || session.host));
+  t.writeln('目标：' + (r.target || (session.host + ':' + session.port)));
+  t.writeln('窗口：' + (r.options ? r.options.width + 'x' + r.options.height : '-') +
+    '，缩放 ' + (r.options ? r.options.scaling : '-') + '%');
+  t.writeln('');
+  t.writeln(g + '[OK] 已调起系统「远程桌面连接」(mstsc) 窗口。' + z);
+  t.writeln(d + '远程桌面画面显示在该独立窗口中，不会在本终端内渲染。' + z);
+  t.writeln(d + '请在弹出的窗口中输入用户名与密码完成连接。' + z);
+  t.writeln(d + '若输入凭据后仍无法连接，通常是目标主机的凭据 / NLA /' + z);
+  t.writeln(d + '远程桌面服务设置问题，与 openshell 终端无关。' + z);
+  t.writeln(d + '配置文件：' + (r.file || '-') + z);
+  t.writeln(d + '本标签仅记录启动结果，可直接关闭。' + z);
+  t.writeln('');
+  refreshSessionOps();
+}
+
 async function connectSession(session) {
   const protocol = Fmt.normalizeProtocol(session.protocol);
   // 首次连接先输入密码/口令并询问是否保存；取消则不发起连接
@@ -849,11 +957,25 @@ async function connectSession(session) {
   session = { ...prepared, logging: prepared.logging || defaultLogging() };
   // RDP 是图形协议，无法在终端渲染，调用系统远程桌面客户端
   if (protocol === 'rdp') {
+    status('正在启动系统「远程桌面连接」…');
     try {
       const r = await api.rdpLaunch(session);
-      status(r.ok ? (r.message || '已启动远程桌面') : (r.error || 'RDP 启动失败'));
-      if (!r.ok) alert(r.error);
-    } catch (e) { alert('RDP 启动失败：' + (e.message || e)); }
+      if (r && r.ok) {
+        status(r.message || '已启动远程桌面');
+        showRdpLaunchInfo(session, r);
+      } else {
+        const msg = (r && r.error) || 'RDP 启动失败';
+        status('RDP 启动失败：' + msg);
+        alert('RDP 启动失败：' + msg +
+          (r && r.file ? '\n\n配置文件：' + r.file : '') +
+          '\n\n排查建议：\n1) 确认系统已安装「远程桌面连接」(mstsc.exe)；\n' +
+          '2) 可直接打开上面的配置文件核对目标地址 / 用户名 / NLA 参数；\n' +
+          '3) 确认目标主机 3389 端口与远程桌面服务正常。');
+      }
+    } catch (e) {
+      status('RDP 启动失败');
+      alert('RDP 启动失败：' + (e.message || e));
+    }
     return;
   }
   // 串口走 Web Serial，按会话里的端口/波特率等参数打开
@@ -1501,11 +1623,15 @@ $('f-protocol').onchange = () => {
   const def = Fmt.defaultPort(p);
   if (!current || current === 22 || current === 23) $('f-port').value = def;
   toggleProtocolFields();
+  // 切到串口协议时重新枚举系统 COM 口（保留当前已选值）
+  if (p === 'serial') loadSerialPorts().catch(() => {});
 };
 $('btn-pick-key').onclick = async () => {
   const p = await api.selectPrivateKey();
   if (p) $('f-keyfile').value = p;
 };
+/* 串口端口号下拉：手动刷新系统 COM 口（插拔 USB 转串口后使用） */
+$('btn-serial-refresh').onclick = () => loadSerialPorts().catch(() => {});
 /* 密码/口令框「显示·隐藏」切换，方便核对输入是否正确 */
 function bindPasswordToggle(btnId, inputId) {
   const btn = $(btnId), input = $(inputId);
@@ -1529,9 +1655,10 @@ document.querySelectorAll('.modal-close, .cancel').forEach((b) => {
 });
 $('btn-session-save').onclick = async () => {
   const name = $('f-name').value.trim();
-  const host = $('f-host').value.trim();
-  const user = $('f-user').value.trim();
   const proto = $('f-protocol').value;
+  // local/serial 的主机/端口输入框已禁用，保存时显式清空，避免残留上一次的旧值
+  const host = ['local', 'serial'].includes(proto) ? '' : $('f-host').value.trim();
+  const user = $('f-user').value.trim();
   // local/serial 不需要主机；raw 需要主机但不需要用户
   const needHost = !['local', 'serial'].includes(proto);
   const needUser = !['raw', 'local', 'serial', 'rdp'].includes(proto);

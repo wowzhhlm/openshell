@@ -211,16 +211,10 @@
           <p class="muted">参照 Xshell「连接 &gt; 串口」。连接时会弹出系统串口选择框，请选中与此处的端口号一致的设备。</p>
           <div class="form-grid">
             <label>端口号(P)
-              <input id="f-serial-port" type="text" list="serial-port-list" value="COM1" placeholder="COM1" />
-              <datalist id="serial-port-list">
-                <option value="COM1"></option><option value="COM2"></option><option value="COM3"></option>
-                <option value="COM4"></option><option value="COM5"></option><option value="COM6"></option>
-                <option value="COM7"></option><option value="COM8"></option><option value="COM9"></option>
-                <option value="COM10"></option><option value="COM11"></option><option value="COM12"></option>
-                <option value="COM13"></option><option value="COM14"></option><option value="COM15"></option>
-                <option value="COM16"></option><option value="COM17"></option><option value="COM18"></option>
-                <option value="COM19"></option><option value="COM20"></option>
-              </datalist>
+              <span class="input-row">
+                <select id="f-serial-port" aria-label="系统检测到的串口"></select>
+                <button id="btn-serial-refresh" type="button" title="重新检测系统串口">🔄</button>
+              </span>
             </label>
             <label>波特率(B)
               <select id="f-serial-baud">
@@ -252,6 +246,7 @@
               </select>
             </label>
           </div>
+          <p id="serial-port-hint" class="muted">正在检测本机串口设备…</p>
           <p class="muted">浏览器 Web Serial 标准仅支持 7/8 数据位、无/偶/奇校验、无/硬件流控制；若选择不受支持的组合，会按最接近的有效值打开并在终端提示。</p>
         </div>
 
