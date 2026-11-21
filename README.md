@@ -1,19 +1,21 @@
-# openshell 2.1
+# openshell 2.2
 
 开源、轻量、无需注册且无有效期的**多协议终端客户端 + 网络拓扑配置工具**。
 
-`openshell 2.1` 是合并后的唯一正式版本，替代此前的 v1.4.x 与 OpenShell 网络版 v2.0.0，两个旧版本的项目文件均已清理。源码与生成结果统一位于 `D:\openshell\`。本项目为从零实现的干净房间（clean-room）客户端，不使用 Xshell / SecureCRT 的代码、签名、品牌资源或任何专有组件。
+`openshell 2.2` 是合并后的唯一正式版本，替代此前的 v1.4.x、OpenShell 网络版 v2.0.0 与 v2.1；旧版本项目文件均已清理。源码与生成结果统一位于 `D:\openshell\`，GitHub 仓库为 `wowzhhlm/openshell`。本项目为从零实现的干净房间（clean-room）客户端，不使用 Xshell / SecureCRT 的代码、签名、品牌资源或任何专有组件。
+
+**v2.2 命名变更**：分发包由「openshell 便携版」改名为 **「openshell 免安装」**（目录 `openshell-2.2-免安装`、压缩包 `openshell-2.2-免安装.zip`），程序内的「便携模式」统一改称「免安装模式」。
 
 ## 核心功能
 
 ### 1. 九种协议终端
 - **SSH**：多标签终端（xterm.js 渲染，密码 / 私钥认证、窗口自适应、主机密钥校验）
 - **Telnet**：明文远程登录，可选自动登录
-- **RLOGIN**：明文远程登录（RFC 1258，端口 513）
+- **RLOGIN**：明文远程登录（RFC 1258，端口 513），**终端速度可配**（默认 38400，写入登录首包）
 - **SFTP**：加密文件传输（独立模式 + 侧边面板，上传 / 下载 / 删除）
 - **FTP**：传统文件传输（端口 21，被动模式，列目录 / 上传 / 下载 / 删除）
-- **RDP**：Windows 远程桌面图形协议，一键调用系统"远程桌面连接"
-- **Serial 串口**：基于 Web Serial API，115200 8N1
+- **RDP**：Windows 远程桌面图形协议，按会话参数生成 `.rdp` 配置后一键调用系统"远程桌面连接"
+- **Serial 串口**：基于 Web Serial API，**端口号 / 波特率 / 数据位 / 停止位 / 奇偶校验 / 流控制均可配**
 - **Local 本地终端**：在本机启动系统 Shell（Windows cmd）
 - **Raw 原始 TCP**：裸连接字符透传
 
@@ -56,7 +58,7 @@
 - 批量导入 / 导出（多文件、目录递归，最多 500 个文件 / 单个 2MB）。
 - **跨客户端迁移**：
   - 可直接导入：Xshell `.xsh`（INI/XML）、SecureCRT `.ini`、OpenShell JSON、**CSV / TSV 表格**（支持中英文表头、乱序列、引号字段、BOM、分号分隔、Xshell 固定列顺序）。
-  - **`.xts` 加密归档自动兜底**：`.xts` 是 Xshell 用主密码加密的专有归档，无法离线解密。v2.1 不再直接报「未解析出有效会话」，而是：
+  - **`.xts` 加密归档自动兜底**：`.xts` 是 Xshell 用主密码加密的专有归档，无法离线解密。当前版本不再直接报「未解析出有效会话」，而是：
     ① 先嗅探内容，若确为明文 INI/XML/JSON/CSV 仍正常解析；
     ② 确认加密后，自动扫描本机 `文档\NetSarang Computer\<版本>\Xshell\Sessions\*.xsh` 并导入同一批会话；
     ③ 也可用「文件 → 从本机 Xshell 会话导入…」主动导入，或在引导弹窗里手动选择 Sessions 目录；
@@ -68,6 +70,21 @@
 - **连接原标签重试**：连接失败后标签保留并显示原因，再次连接同一会话或右键「重新连接」会**在原标签追加「第 N 次连接尝试」分隔线并完整保留历史错误信息**，不清屏、不另开新标签。
 - **SSH 算法兼容**：算法列表放在 ssh2 要求的 `cfg.algorithms`（此前误放在 cfg 顶层导致修复无效），覆盖 `diffie-hellman-group14-sha1` / `aes128-cbc` / `ssh-rsa` / `hmac-sha1` 等旧算法，解决 `no matching key exchange algorithm` 握手失败；已用「默认算法必失败 / 修复算法必成功」的对照组实测验证。
 - 导出位置自选（系统目录选择对话框）。
+
+### 6. 会话高级参数（v2.2 新增，参照 Xshell 同类设置）
+
+新建 / 编辑会话弹窗改为六个标签页：**常规 / 串口 / RLOGIN / RDP / 保持活动 / 日志**。参数随会话保存、随 OpenShell JSON 导入导出往返，也可从 Xshell `.xsh` 文件尽力还原；所有值在 `session-format.js` 的 `optionDefaults()` 与主进程中做类型与范围校验。
+
+- **串口**：端口号（COM1…COM20，可手输）、波特率（300～921600）、数据位（5/6/7/8）、停止位（1/2）、奇偶校验（无 / 偶 / 奇 / 标记 / 空格）、流控制（无 / 硬件 RTS-CTS / 软件 XON-XOFF）。Web Serial 标准仅支持 7/8 数据位、none/even/odd 校验与 none/hardware 流控制，不受支持的组合按最接近有效值打开并在终端提示。
+- **RLOGIN**：终端速度（300～115200，默认 38400），写入 RFC 1258 登录首包 speed 字段。
+- **RDP**：窗口大小（Work Space 当前工作区 / 全屏 / 自定义宽高）、智能重新连接、屏幕缩放、颜色质量（32/24/16/15 bit）、在远程计算机上应用密钥组合、共享本机驱动器、远程音频播放（不播放 / 本地 / 远程）、从这台电脑录制、使用 Windows 身份验证。参数写入 `配置\rdp-*.rdp` 后交给系统 `mstsc`，**不写入明文密码**。
+- **保持活动状态**（SSH / Telnet / RLOGIN / Raw / FTP）：
+  - 连接会话期间发送保持活动状态消息（间隔秒数，默认 60 秒；SSH 用协议层 `keepaliveInterval`，取消勾选则设为 0 禁用）；
+  - 网络空闲时发送字符串（间隔秒数 + 自定义字符串，支持 `\n` / `\r` / `\t` 转义；数据到达时间由主进程 `send()` 统一刷新）；
+  - 网络为空闲状态时发送 TCP 保持活动数据包（`SO_KEEPALIVE`；Telnet/RLOGIN/Raw 用公开 API，SSH 在 `ready` 后设置底层 socket，默认路径完全不变）。
+- **连接日志**：按会话启用，支持追加到已有日志 / 每次连接新建文件、每行时间戳、可选记录键盘输入；「设置」里可开启「新建会话默认启用连接日志」。日志覆盖终端输出、连接进度、状态、错误与端口转发记录，串口（Web Serial）数据由渲染层经 `log:write` 汇入同一个写入器，ANSI 转义会被剥离、按行缓冲写入。文件位于 `日志\`，「文件 → 打开会话日志目录」可直接打开。
+
+> 日志会记录终端输出，远程回显的敏感内容无法过滤；「记录键盘输入」默认关闭，请谨慎开启并妥善保管日志文件。
 
 ## 安全设计
 
@@ -84,11 +101,12 @@
 ## 目录与数据
 
 - 源码与生成结果根目录：`D:\openshell\`
-- 输出目录：`D:\openshell\导出`、`下载`、`报告`
+- 输出目录：`D:\openshell\导出`、`下载`、`报告`、`日志`（会话连接日志）、`配置`（临时 .rdp 文件）
 - 拓扑配置包：`D:\openshell\导出\配置包_<时间>\`（每台设备一个 `.cfg` + 合并包 + `清单.txt`）
 - 调研文档：`D:\openshell\报告\拓扑引擎评估与升级方案.md`
-- 便携模式：程序目录存在 `portable.txt` 时，数据写入程序同级的 `openshell数据\`，全套目录复制到 U 盘即可换机使用。
-- 用户配置：`%APPDATA%\openshell`（标准模式）/ 程序目录（便携模式）
+- 免安装模式：程序目录存在 `portable.txt` 时，数据写入程序同级的 `openshell数据\`，整套目录复制到 U 盘即可换机使用（分发目录 `openshell-2.2-免安装`、压缩包 `openshell-2.2-免安装.zip`）。
+- 用户配置：`%APPDATA%\openshell`（标准模式）/ 程序目录（免安装模式）
+- GitHub 仓库：`https://github.com/wowzhhlm/openshell`
 
 ## 运行
 
@@ -106,13 +124,13 @@ npm test
 # test-format / test-telnet / test-features / test-vault / test-kex / test-import / test-smart
 ```
 
-其中 `test-kex.js` 用「服务端强制旧算法 + 对照组/实验组」验证 SSH 兼容性，`test-import.js` 覆盖 CSV / TSV、`.xts` 加密归档标记与明文 `.xts` 嗅探，`test-smart.js` 覆盖智能配置引擎的 11 组纯函数。
+其中 `test-kex.js` 用「服务端强制旧算法 + 对照组/实验组」验证 SSH 兼容性，`test-import.js` 覆盖 CSV / TSV、`.xts` 加密归档标记与明文 `.xts` 嗅探，`test-features.js` 覆盖会话高级参数的默认值 / 越界校验 / JSON 导入导出往返 / `.xsh` 参数解析，`test-smart.js` 覆盖智能配置引擎的 11 组纯函数。
 
-v2.1 另做过两类端到端验证（不随 npm test 运行）：
+v2.2 另做过两类端到端验证（不随 npm test 运行）：
 - **DOM / IPC 一致性检查**：顶部菜单 `data-action` 全部有实现、`api.*` 调用全部在 preload 暴露、INVOKE/SEND/ON 通道在主进程均有对应 handler / listener。
-- **CDP 运行验证（21 项全通过，源码版与便携版 exe 各跑一遍）**：一级菜单点击直达、`.xts` 真实从本机 Xshell 目录兜底导入 7 个会话、首次连接「输入密码 → 是否保存」弹窗顺序、临时凭据不落盘、密码框 👁 切换；本轮新增——模态框标题栏拖动与双击复位、Linux 面板非模态/拖动/缩放/收起/半透明/位置记忆、命令复制与发送到终端、会话断开按钮的状态联动与实际断开。
+- **CDP 运行验证（源码版 Electron 与免安装版 exe 各跑一遍）**：在 v2.1 的 21 项基础上，新增会话参数标签页切换与协议联动、串口 / RLOGIN / RDP / 保持活动 / 日志字段的表单往返读写、参数默认值与越界回落、日志目录与免安装模式数据目录断言。
 
-打包便携版：
+打包免安装版（产物为 `dist\win-unpacked\openshell.exe`，同步到 `dist\openshell-2.2-免安装\` 后压缩为 `openshell-2.2-免安装.zip`）：
 
 ```bash
 npm run dist

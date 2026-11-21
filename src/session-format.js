@@ -34,6 +34,102 @@
     return PROTOCOLS.includes(v) ? v : 'ssh';
   }
 
+  /* ---------------- 会话高级参数 ----------------
+     参照 Xshell「连接 > 串口 / RLOGIN / RDP / 保持活动状态 / 日志」。
+     这些字段是可选扩展：旧版会话文件没有时不会凭空附加，保持向后兼容。
+     optionDefaults() 同时用于 UI 填充和主进程连接，所有值都做类型与范围校验。 */
+  const OPTION_DEFAULTS = {
+    params: {
+      serial: { port: 'COM1', baudRate: 115200, dataBits: 8, stopBits: 1, parity: 'none', flowControl: 'none' },
+      rlogin: { terminalSpeed: 38400 },
+      rdp: {
+        windowMode: 'workspace', width: 3120, height: 2080,
+        smartReconnect: true, scaling: 200, colorDepth: 32,
+        applyKeyCombinations: true, shareDrives: false,
+        audioMode: 'noplay', recordAudio: true, windowsAuth: false
+      }
+    },
+    keepalive: {
+      enabled: true, interval: 60,
+      sendStringOnIdle: false, idleInterval: 0, idleString: '', tcpKeepAlive: false
+    },
+    logging: { enabled: false, mode: 'append', timestamp: true, logInput: false }
+  };
+
+  function num(v, def, min, max) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return def;
+    return Math.min(max, Math.max(min, Math.round(n)));
+  }
+  function bool(v, def) { return typeof v === 'boolean' ? v : def; }
+  function enumVal(v, allowed, def) { return allowed.includes(v) ? v : def; }
+  function text(v, def, maxLen) {
+    const s = (v == null ? '' : String(v)).slice(0, maxLen || 200);
+    return s || def;
+  }
+  function obj(v) { return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; }
+
+  function optionDefaults(session) {
+    const s = obj(session);
+    const p = obj(s.params);
+    const ser = obj(p.serial), rl = obj(p.rlogin), rdp = obj(p.rdp);
+    const ka = obj(s.keepalive), lg = obj(s.logging);
+    const D = OPTION_DEFAULTS;
+    const bauds = [300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
+    const speeds = [300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200];
+    return {
+      params: {
+        serial: {
+          port: text(ser.port, D.params.serial.port, 32).replace(/[\\/:*?"<>|]/g, ''),
+          baudRate: enumVal(num(ser.baudRate, D.params.serial.baudRate, 300, 921600), bauds, D.params.serial.baudRate),
+          dataBits: enumVal(num(ser.dataBits, 8, 5, 8), [5, 6, 7, 8], 8),
+          stopBits: enumVal(num(ser.stopBits, 1, 1, 2), [1, 2], 1),
+          parity: enumVal(String(ser.parity || ''), ['none', 'even', 'odd', 'mark', 'space'], 'none'),
+          flowControl: enumVal(String(ser.flowControl || ''), ['none', 'hardware', 'software'], 'none')
+        },
+        rlogin: {
+          terminalSpeed: enumVal(num(rl.terminalSpeed, D.params.rlogin.terminalSpeed, 300, 115200), speeds, D.params.rlogin.terminalSpeed)
+        },
+        rdp: {
+          windowMode: enumVal(String(rdp.windowMode || ''), ['workspace', 'fullscreen', 'custom'], 'workspace'),
+          width: num(rdp.width, D.params.rdp.width, 320, 16384),
+          height: num(rdp.height, D.params.rdp.height, 240, 16384),
+          smartReconnect: bool(rdp.smartReconnect, true),
+          scaling: enumVal(num(rdp.scaling, 200, 100, 500), [100, 125, 150, 175, 200, 250, 300], 200),
+          colorDepth: enumVal(num(rdp.colorDepth, 32, 8, 32), [8, 15, 16, 24, 32], 32),
+          applyKeyCombinations: bool(rdp.applyKeyCombinations, true),
+          shareDrives: bool(rdp.shareDrives, false),
+          audioMode: enumVal(String(rdp.audioMode || ''), ['noplay', 'local', 'remote'], 'noplay'),
+          recordAudio: bool(rdp.recordAudio, true),
+          windowsAuth: bool(rdp.windowsAuth, false)
+        }
+      },
+      keepalive: {
+        enabled: bool(ka.enabled, true),
+        interval: num(ka.interval, 60, 1, 3600),
+        sendStringOnIdle: bool(ka.sendStringOnIdle, false),
+        idleInterval: num(ka.idleInterval, 0, 0, 3600),
+        idleString: String(ka.idleString == null ? '' : ka.idleString).slice(0, 256),
+        tcpKeepAlive: bool(ka.tcpKeepAlive, false)
+      },
+      logging: {
+        enabled: bool(lg.enabled, false),
+        mode: enumVal(String(lg.mode || ''), ['append', 'overwrite'], 'append'),
+        timestamp: bool(lg.timestamp, true),
+        logInput: bool(lg.logInput, false)
+      }
+    };
+  }
+
+  /* 复制可选扩展字段（仅在源对象存在时），保证旧版会话 round-trip 不变 */
+  function withOptions(target, src) {
+    const out = { ...target };
+    ['params', 'keepalive', 'logging'].forEach((k) => {
+      if (src && src[k] && typeof src[k] === 'object' && !Array.isArray(src[k])) out[k] = src[k];
+    });
+    return out;
+  }
+
   function guessFormat(text, fileName) {
     const t = text || '';
     const name = (fileName || '').toLowerCase();
@@ -79,8 +175,11 @@
       let key = line.slice(0, eq).trim();
       const value = line.slice(eq + 1).trim();
       key = key.replace(/^[SDB]:\s*/, '').replace(/^"|"$/g, '');
-      out[section + '|' + key.toLowerCase()] = value;
-      out[key.toLowerCase()] = value;
+      // section 统一小写，便于 pick() 用 'serial|port' 等稳定键匹配
+      // （Xshell .xsh 里段名大小写不固定，如 [SERIAL] / [Serial]）
+      const lk = key.toLowerCase();
+      out[section.toLowerCase() + '|' + lk] = value;
+      out[lk] = value;
     });
     return out;
   }
@@ -111,11 +210,12 @@
       (fileName || '').replace(/\.xsh$/i, '') || host;
     const keyFile = pick(m, ['ssh|keyfile', 'ssh|userkeyfile', 'ssh|publickeyfile', 'keyfile', 'userkeyfile', 'publickeyfile']);
     const authMethod = pick(m, ['ssh|authmethod', 'authmethod', 'ssh|authenticationmethod']);
-    return [{
+    const base = {
       name, group: groupHint || '', host, port, user, protocol,
       auth: authFrom(authMethod, keyFile),
       keyfile: keyFile, password: '', passphrase: '', needsCredential: true
-    }];
+    };
+    return [withOptions(base, parseSessionOptions(m))];
   }
 
   function xmlText(block, tags) {
@@ -182,7 +282,7 @@
   }
 
   function normalizeSession(s) {
-    return {
+    const base = {
       id: safe(s.id) || ('s-' + Date.now() + '-' + Math.random().toString(16).slice(2, 8)),
       name: safe(s.name) || safe(s.host),
       group: safe(s.group),
@@ -196,6 +296,74 @@
       needsCredential: true,
       credentialId: safe(s.credentialId) || safe(s.id) || ''
     };
+    return withOptions(base, s);
+  }
+
+  /* 从 Xshell / SecureCRT 的 INI 键值里尽力还原协议参数（宽松匹配，解析不到就不附加） */
+  function parseSessionOptions(m) {
+    const out = {};
+    const params = {};
+    const p = (keys) => pick(m, keys);
+    const parityMap = { '0': 'none', '1': 'odd', '2': 'even', '3': 'mark', '4': 'space',
+      none: 'none', odd: 'odd', even: 'even', mark: 'mark', space: 'space' };
+    const flowMap = { '0': 'none', '1': 'software', '2': 'hardware',
+      none: 'none', xon: 'software', software: 'software', rts: 'hardware', hardware: 'hardware' };
+
+    const comRaw = p(['serial|port', 'serial|portname', 'serial|comport', 'comport', 'serialport', 'portname']);
+    const baud = p(['serial|baudrate', 'serial|baud', 'baudrate', 'baud']);
+    const db = p(['serial|databits', 'databits', 'bytesize']);
+    const sb = p(['serial|stopbits', 'stopbits']);
+    const par = p(['serial|parity', 'parity']);
+    const flow = p(['serial|flowcontrol', 'flowcontrol', 'serial|flow']);
+    const serial = {};
+    if (/^com\d+/i.test(comRaw)) serial.port = comRaw.toUpperCase();
+    if (/^\d+$/.test(baud)) serial.baudRate = parseInt(baud, 10);
+    if (/^[5-8]$/.test(db)) serial.dataBits = parseInt(db, 10);
+    if (/^[12]$/.test(sb)) serial.stopBits = parseInt(sb, 10);
+    if (par && parityMap[String(par).toLowerCase()]) serial.parity = parityMap[String(par).toLowerCase()];
+    if (flow && flowMap[String(flow).toLowerCase()]) serial.flowControl = flowMap[String(flow).toLowerCase()];
+    if (Object.keys(serial).length) params.serial = serial;
+
+    const speed = p(['rlogin|terminalspeed', 'rlogin|speed', 'terminalspeed', 'terminal speed']);
+    if (/^\d+$/.test(speed)) params.rlogin = { terminalSpeed: parseInt(speed, 10) };
+
+    const rdp = {};
+    const w = p(['rdp|desktopwidth', 'desktopwidth', 'rdp|width']);
+    const h = p(['rdp|desktopheight', 'desktopheight', 'rdp|height']);
+    const bpp = p(['rdp|session bpp', 'session bpp', 'rdp|color depth', 'color depth']);
+    const scale = p(['rdp|desktopscalefactor', 'desktopscalefactor', 'rdp|scaling']);
+    const mode = p(['rdp|screen mode id', 'screen mode id']);
+    if (/^\d+$/.test(w)) rdp.width = parseInt(w, 10);
+    if (/^\d+$/.test(h)) rdp.height = parseInt(h, 10);
+    if (/^\d+$/.test(bpp)) rdp.colorDepth = parseInt(bpp, 10);
+    if (/^\d+$/.test(scale)) rdp.scaling = parseInt(scale, 10);
+    if (mode === '2') rdp.windowMode = 'fullscreen';
+    const sr = p(['rdp|smart reconnect', 'smart reconnect']);
+    if (sr) rdp.smartReconnect = /^1|true|yes$/i.test(sr);
+    const kh = p(['rdp|keyboardhook', 'keyboardhook']);
+    if (kh) rdp.applyKeyCombinations = kh === '1';
+    const dr = p(['rdp|drivestoredirect', 'drivestoredirect']);
+    if (dr) rdp.shareDrives = /\*|[a-z]:/i.test(dr);
+    const am = p(['rdp|audiomode', 'audiomode']);
+    if (am) rdp.audioMode = ({ '0': 'local', '1': 'remote', '2': 'noplay' })[am] || 'noplay';
+    const ac = p(['rdp|audiocapturemode', 'audiocapturemode']);
+    if (ac) rdp.recordAudio = ac === '1';
+    const cs = p(['rdp|enablecredsspsupport', 'enablecredsspsupport']);
+    if (cs) rdp.windowsAuth = cs === '0';
+    if (Object.keys(rdp).length) params.rdp = rdp;
+    if (Object.keys(params).length) out.params = params;
+
+    const kaRaw = p(['connection|keepalive', 'keepalive', 'keepalive|enabled']);
+    const kaInt = p(['connection|keepaliveinterval', 'keepaliveinterval', 'keepalive|interval']);
+    if (kaRaw || kaInt) {
+      out.keepalive = {
+        enabled: kaRaw ? /^1|true|yes$/i.test(kaRaw) : true,
+        interval: /^\d+$/.test(kaInt) ? parseInt(kaInt, 10) : 60
+      };
+    }
+    const logOn = p(['log|enable', 'log|enabled', 'logging|enabled']);
+    if (logOn) out.logging = { enabled: /^1|true|yes$/i.test(logOn) };
+    return out;
   }
 
   function parseOpenSsh(text) {
@@ -423,14 +591,14 @@
   }
 
   function toOpenShell(sessions, vaultPayload) {
-    const list = sessions.map((s) => ({
+    const list = sessions.map((s) => withOptions({
       id: safe(s.id),
       name: safe(s.name), group: safe(s.group), host: safe(s.host),
       port: parseInt(s.port, 10) || defaultPort(normalizeProtocol(s.protocol)), user: safe(s.user),
       protocol: normalizeProtocol(s.protocol),
       auth: s.auth === 'privatekey' ? 'privatekey' : 'password',
       keyfile: safe(s.keyfile)
-    }));
+    }, s));
     // 带主密码加密的密码保险库 -> 用带标记的对象封装；否则保持纯数组（兼容旧版）
     const content = vaultPayload
       ? JSON.stringify({ format: 'openshell-vault', version: 2, openshellVault: vaultPayload, sessions: list }, null, 2)
@@ -440,6 +608,7 @@
 
   return {
     PROTOCOLS, protocolFrom, normalizeProtocol, defaultPort, protocolName,
+    OPTION_DEFAULTS, optionDefaults, withOptions,
     guessFormat, parseFile, parseOpenSsh, parseOpenSshVault, parseTable,
     parseXshellIni, parseXshellXml, parseSecureCrt,
     toXshell, toSecureCrt, toOpenShell, safeName

@@ -1,13 +1,15 @@
-const { app, BrowserWindow, ipcMain, dialog, session, safeStorage, shell, clipboard, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, session, safeStorage, shell, clipboard, Menu, screen } = require('electron');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 const net = require('net');
+const os = require('os');
 const { spawn } = require('child_process');
 const { Client } = require('ssh2');
 const SSH_CONST = require('ssh2/lib/protocol/constants');
 const Vault = require('./vault');
 const FTP = require('./ftp');
+const Fmt = require('./session-format');
 
 // 构建"现代优先 + 兼容旧设备"的算法列表：直接使用 ssh2 官方 DEFAULT/SUPPORTED 全集，
 // 把旧算法（group14-sha1 / group1-sha1 / cbc / 3des / ssh-rsa / ssh-dss）也纳入，
@@ -24,7 +26,7 @@ let mainWindow = null;
 const tabs = new Map();
 
 /* ---------------- 运行时路径 ----------------
-   便携模式：exe 同级存在 portable.txt 时，所有数据与配置写入程序所在目录，
+   免安装模式：exe 同级存在 portable.txt 时，所有数据与配置写入程序所在目录，
    因此整套目录复制到 U 盘后换电脑仍可正常使用（不依赖 D 盘）。
    普通模式：保持原有约定，统一写入 D:\openshell。                       */
 let APP_DIR = 'D:\\openshell';
@@ -43,12 +45,14 @@ const MASTER_FILE = () => path.join(app.getPath('userData'), 'master-verifier.js
 const EXPORT_DIR = path.join(OUTPUT_ROOT, '导出');
 const DOWNLOAD_DIR = path.join(OUTPUT_ROOT, '下载');
 const REPORT_DIR = path.join(OUTPUT_ROOT, '报告');
+const LOG_DIR = path.join(OUTPUT_ROOT, '日志');
+const CONFIG_DIR = path.join(OUTPUT_ROOT, '配置');
 const SESSION_EXTS = new Set(['.xsh', '.ini', '.json', '.xml', '.txt', '.csv', '.tsv', '.xts', '.xse']);
 const MAX_BATCH_FILES = 500;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
 function ensureOutputDirs() {
-  [OUTPUT_ROOT, EXPORT_DIR, DOWNLOAD_DIR, REPORT_DIR].forEach((d) => {
+  [OUTPUT_ROOT, EXPORT_DIR, DOWNLOAD_DIR, REPORT_DIR, LOG_DIR, CONFIG_DIR].forEach((d) => {
     try { fs.mkdirSync(d, { recursive: true }); } catch {}
   });
 }
@@ -65,9 +69,99 @@ function writeJson(file, value) {
 function loadCreds() { return readJson(CRED_FILE(), {}); }
 function loadHosts() { return readJson(HOSTS_FILE(), {}); }
 
+/* ---------------- 会话连接日志 ----------------
+   所有终端输出、连接进度、状态与错误都经过 send()，在此统一写入日志文件，
+   因此 SSH / Telnet / RLOGIN / Raw / FTP / Local 无需各自埋点；串口（渲染层 Web Serial）
+   通过 log:write IPC 走同一个 writeSessionLog()。日志默认关闭，按会话单独配置。 */
+const logStates = new Map();
+
+function stripAnsi(s) {
+  return String(s == null ? '' : s)
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '');
+}
+function logStamp(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+    p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+function fileStamp(d) {
+  return logStamp(d).replace(/[-: ]/g, '-');
+}
+function logStateFor(tabId, sess, cfg) {
+  const existing = logStates.get(tabId);
+  if (existing) return existing;
+  try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch {}
+  const name = Fmt.safeName(sess.name || sess.host || 'session');
+  const file = path.join(LOG_DIR,
+    cfg.mode === 'append' ? name + '.log' : name + '_' + fileStamp(new Date()) + '.log');
+  const header = [
+    '===== openshell 会话日志 =====',
+    '会话: ' + String(sess.name || sess.host || 'session'),
+    '协议: ' + String(sess.protocol || '').toUpperCase() +
+      '  主机: ' + String(sess.host || '') + ':' + String(sess.port || '') +
+      '  用户: ' + String(sess.user || ''),
+    '开始时间: ' + logStamp(new Date()),
+    '============================',
+    ''
+  ].join(os.EOL);
+  try {
+    const exists = fs.existsSync(file);
+    fs.writeFileSync(file, header, { encoding: 'utf8', flag: (cfg.mode === 'append' && exists) ? 'a' : 'w' });
+  } catch { return null; }
+  const st = { file, cfg, buffer: '' };
+  logStates.set(tabId, st);
+  return st;
+}
+function writeSessionLog(tabId, text, meta) {
+  if (text == null || text === '') return;
+  const key = String(tabId || '');
+  if (!key) return;
+  const tab = tabs.get(key);
+  const sess = (tab && tab.session) || (meta && meta.session) || meta || {};
+  const raw = (tab && tab.session && tab.session.logging) ||
+    (meta && (meta.logging || (meta.session && meta.session.logging))) || sess.logging || {};
+  const cfg = Fmt.optionDefaults({ logging: raw }).logging;
+  if (!cfg.enabled) return;
+  const st = logStateFor(key, sess, cfg);
+  if (!st) return;
+  st.buffer += stripAnsi(text);
+  const lines = st.buffer.split(/\r\n|\n|\r/);
+  st.buffer = lines.pop() || '';
+  if (!lines.length) return;
+  const now = logStamp(new Date());
+  const out = lines.map((l) => (cfg.timestamp ? '[' + now + '] ' : '') + l).join(os.EOL) + os.EOL;
+  try { fs.appendFileSync(st.file, out, 'utf8'); } catch {}
+}
+function endLog(tabId) {
+  const key = String(tabId || '');
+  const st = logStates.get(key);
+  if (!st) return;
+  if (st.buffer) {
+    try {
+      fs.appendFileSync(st.file,
+        (st.cfg.timestamp ? '[' + logStamp(new Date()) + '] ' : '') + stripAnsi(st.buffer) + os.EOL, 'utf8');
+    } catch {}
+  }
+  try { fs.appendFileSync(st.file, '===== 连接结束 ' + logStamp(new Date()) + ' =====' + os.EOL, 'utf8'); } catch {}
+  logStates.delete(key);
+}
+
 function send(channel, ...args) {
+  // 数据到达即刷新「最近活动时间」，供空闲发送字符串判断
+  if (channel === 'ssh:data' && args[0] != null) {
+    const t = tabs.get(String(args[0]));
+    if (t) t.kaLastDataAt = Date.now();
+  }
+  if (['ssh:data', 'ssh:progress', 'ssh:status', 'ssh:error', 'ssh:forwardLog'].includes(channel) && args[0] != null) {
+    const raw = channel === 'ssh:error' ? '[ERROR] ' + String(args[1] || '') : String(args[1] || '');
+    writeSessionLog(args[0], channel === 'ssh:data' ? raw : raw + os.EOL);
+  }
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, ...args);
 }
+
+ipcMain.on('log:write', (_event, tabId, text, meta) => writeSessionLog(tabId, text, meta));
+ipcMain.on('log:end', (_event, tabId) => endLog(tabId));
 
 let ctxGuard = false; // 终端区域右键时为 true，抑制原生编辑菜单
 ipcMain.on('ctx:guard', (e, v) => { ctxGuard = !!v; e.returnValue = true; });
@@ -109,7 +203,7 @@ function createWindow() {
     height: 900,
     minWidth: 960,
     minHeight: 640,
-    title: 'openshell 2.1 - 多协议终端与网络拓扑配置工具',
+    title: 'openshell 2.2 - 多协议终端与网络拓扑配置工具',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -141,13 +235,14 @@ function decodeTextBuffer(buf) {
 }
 
 /* ---------------- 窗口与对话框 ---------------- */
-ipcMain.handle('app:version', () => '2.1');
+ipcMain.handle('app:version', () => '2.2');
 ipcMain.handle('app:outputDirs', () => ({
   root: OUTPUT_ROOT, exports: EXPORT_DIR, downloads: DOWNLOAD_DIR, reports: REPORT_DIR,
-  portable: PORTABLE_MODE, appDir: APP_DIR
+  logs: LOG_DIR, portable: PORTABLE_MODE, appDir: APP_DIR
 }));
 ipcMain.handle('app:openPath', async (_event, target) => {
-  const dir = target === 'exports' ? EXPORT_DIR : target === 'downloads' ? DOWNLOAD_DIR : target === 'reports' ? REPORT_DIR : OUTPUT_ROOT;
+  const dirs = { exports: EXPORT_DIR, downloads: DOWNLOAD_DIR, reports: REPORT_DIR, logs: LOG_DIR };
+  const dir = dirs[target] || OUTPUT_ROOT;
   await shell.openPath(dir);
   return dir;
 });
@@ -495,14 +590,43 @@ function applyForwarding(tab, rules) {
   });
 }
 
+/* ---------------- 保持活动状态 ----------------
+   Xshell「连接 > 保持活动状态」的三类能力：
+   1) 协议层 keepalive（SSH cfg.keepaliveInterval，由调用方应用）
+   2) 底层 TCP SO_KEEPALIVE（telnet/rlogin/raw 用公开 API，SSH 在 ready 后设置底层 socket）
+   3) 网络空闲时发送字符串（此处统一由定时器实现，数据到达时间由 send() 刷新） */
+function decodeIdleString(s) {
+  return String(s == null ? '' : s)
+    .replace(/\\n/gi, '\n').replace(/\\r/gi, '\r')
+    .replace(/\\t/gi, '\t').replace(/\\0/gi, '\0');
+}
+function setupKeepalive(tab, session) {
+  const ka = Fmt.optionDefaults(session).keepalive;
+  tab.kaLastDataAt = Date.now();
+  if (ka.sendStringOnIdle && ka.idleInterval > 0 && ka.idleString) {
+    const payload = decodeIdleString(ka.idleString);
+    tab.kaTimer = setInterval(() => {
+      if (Date.now() - (tab.kaLastDataAt || Date.now()) < ka.idleInterval * 1000) return;
+      const t = tabs.get(tab.id);
+      if (t && t.stream && typeof t.stream.write === 'function') {
+        try { t.stream.write(payload); } catch {}
+      }
+      tab.kaLastDataAt = Date.now();
+    }, Math.max(1000, Math.min(5000, ka.idleInterval * 500)));
+  }
+  return ka;
+}
+
 function closeTabResources(tab) {
-  tab.forwardServers.forEach((s) => { try { s.close(); } catch {} });
+  (tab.forwardServers || []).forEach((s) => { try { s.close(); } catch {} });
   tab.forwardServers = [];
+  if (tab.kaTimer) { try { clearInterval(tab.kaTimer); } catch {} tab.kaTimer = null; }
   if (tab.sftp) { try { tab.sftp.end(); } catch {} tab.sftp = null; }
   if (tab.ftp) { try { tab.ftp.close(); } catch {} tab.ftp = null; }
   if (tab.localChild) { try { tab.localChild.kill(); } catch {} tab.localChild = null; }
   if (tab.stream) { try { tab.stream.end(); } catch {} tab.stream = null; }
   if (tab.conn) { try { tab.conn.end(); } catch {} tab.conn = null; }
+  endLog(tab.id);
 }
 
 /* ---------------- Telnet / 原始 TCP 连接 ---------------- */
@@ -539,6 +663,8 @@ ipcMain.handle('telnet:connect', async (_event, tabId, session) => {
   if (tabs.has(tabId)) closeTabResources(tabs.get(tabId));
   const tab = { id: tabId, conn: null, stream: null, sftp: null, forwardServers: [], session: stripInlineCreds(session) };
   tabs.set(tabId, tab);
+  const ka = setupKeepalive(tab, session);
+  const protoParams = Fmt.optionDefaults(session).params;
 
   const isRaw = session.protocol === 'raw';
   const isRlogin = session.protocol === 'rlogin';
@@ -556,6 +682,7 @@ ipcMain.handle('telnet:connect', async (_event, tabId, session) => {
   else send('ssh:progress', tabId, isRaw ? '原始 TCP 连接建立中…' : 'Telnet 选项协商中，请等待远程提示…');
   const socket = net.createConnection({ host, port });
   tab.stream = socket;
+  try { socket.setKeepAlive(!!ka.tcpKeepAlive, ka.interval * 1000); } catch {}
 
   // RLOGIN 无 IAC 协商，就是明文透传；登录由首包固定格式完成
   const plainParse = (chunk) => send('ssh:data', tabId, chunk.toString('utf8'));
@@ -583,11 +710,13 @@ ipcMain.handle('telnet:connect', async (_event, tabId, session) => {
   socket.on('connect', () => {
     if (isRlogin) {
       // RFC 1258：\0<local-user>\0<remote-user>\0<terminal>\0<speed>\0
+      // 终端速度来自「RLOGIN」参数设置（Xshell 对应「终端速度(T)」，默认 38400）。
       const localUser = user || process.env.USERNAME || process.env.USER || 'root';
       const term = 'xterm';
-      const init = Buffer.from('\0' + localUser + '\0' + user + '\0' + term + '\09600\0', 'utf8');
+      const speed = String(protoParams.rlogin.terminalSpeed);
+      const init = Buffer.from('\0' + localUser + '\0' + user + '\0' + term + '\0' + speed + '\0', 'utf8');
       socket.write(init);
-      send('ssh:progress', tabId, 'RLOGIN 登录请求已发送，连接已建立。');
+      send('ssh:progress', tabId, `RLOGIN 登录请求已发送（终端速度 ${speed}），连接已建立。`);
     } else {
       send('ssh:progress', tabId, isRaw ? 'TCP 连接已建立，开始透传数据。' : 'Telnet 连接已建立。');
     }
@@ -599,10 +728,14 @@ ipcMain.handle('telnet:connect', async (_event, tabId, session) => {
     send('ssh:status', tabId, '连接失败');
     try { socket.destroy(); } catch {}
     if (tabs.get(tabId) === tab) { tabs.delete(tabId); send('ssh:close', tabId); }
+    if (tab.kaTimer) { clearInterval(tab.kaTimer); tab.kaTimer = null; }
+    endLog(tabId);
   });
   socket.on('close', () => {
     send('ssh:progress', tabId, '\x1b[2m[连接已关闭]\x1b[0m');
     if (tabs.get(tabId) === tab) send('ssh:close', tabId);
+    if (tab.kaTimer) { clearInterval(tab.kaTimer); tab.kaTimer = null; }
+    endLog(tabId);
   });
   return { ok: true };
 });
@@ -613,13 +746,16 @@ ipcMain.handle('ssh:connect', async (_event, tabId, session) => {
   if (tabs.has(tabId)) closeTabResources(tabs.get(tabId));
   const tab = { id: tabId, conn: null, stream: null, sftp: null, forwardServers: [], session: stripInlineCreds(session) };
   tabs.set(tabId, tab);
+  const ka = setupKeepalive(tab, session);
 
   const cfg = {
     host: String(session.host),
     port: Number(session.port) || 22,
     username: String(session.user || ''),
     readyTimeout: 20000,
-    keepaliveInterval: 10000,
+    // 保持活动：默认 60 秒发送一次 SSH 协议层 keepalive；取消勾选则禁用（0）。
+    keepaliveInterval: ka.enabled ? ka.interval * 1000 : 0,
+    keepaliveCountMax: 3,
     hostHash: 'sha256',
     // 关键：ssh2 只读取 cfg.algorithms 对象内的算法列表（键名为 kex/cipher/serverHostKey/hmac）。
     // 之前误放在 cfg 顶层，ssh2 完全忽略，仍用默认算法导致老旧服务器握手失败。
@@ -678,6 +814,13 @@ ipcMain.handle('ssh:connect', async (_event, tabId, session) => {
       send('ssh:progress', tabId, 'SSH 握手完成，正在认证…');
     });
     conn.on('ready', () => {
+      // TCP SO_KEEPALIVE：仅当会话显式启用时设置底层 socket，默认路径完全不变
+      if (ka.tcpKeepAlive) {
+        try {
+          const sock = conn._sock;
+          if (sock && typeof sock.setKeepAlive === 'function') sock.setKeepAlive(true, ka.interval * 1000);
+        } catch {}
+      }
       send('ssh:progress', tabId, '认证成功，正在打开终端…');
       send('ssh:status', tabId, '已连接 ' + cfg.host);
       done(true);
@@ -715,9 +858,11 @@ ipcMain.handle('ssh:connect', async (_event, tabId, session) => {
     });
     conn.on('close', () => {
       send('ssh:progress', tabId, '\x1b[2m[Connection closed]\x1b[0m');
-      tab.forwardServers.forEach((s) => { try { s.close(); } catch {} });
+      (tab.forwardServers || []).forEach((s) => { try { s.close(); } catch {} });
       tab.forwardServers = [];
       if (tabs.get(tabId) === tab) send('ssh:close', tabId);
+      if (tab.kaTimer) { clearInterval(tab.kaTimer); tab.kaTimer = null; }
+      endLog(tabId);
       done(false, '连接已关闭');
     });
   });
@@ -748,6 +893,7 @@ ipcMain.on('ssh:resize', (_event, tabId, cols, rows) => {
 ipcMain.on('ssh:disconnect', (_event, tabId) => {
   const tab = tabs.get(tabId);
   if (tab) { closeTabResources(tab); tabs.delete(tabId); }
+  else endLog(tabId);
 });
 
 /* ---------------- SFTP ---------------- */
@@ -930,14 +1076,17 @@ ipcMain.handle('topology:saveConfigPackage', async (_event, payload) => {
 
 /* ---------------- 本地终端 (local) ---------------- */
 let localSeq = 0;
-ipcMain.handle('local:spawn', async (_event, tabId) => {
+ipcMain.handle('local:spawn', async (_event, tabId, session) => {
   const shell = process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : '/bin/bash';
   let child;
   try {
     child = spawn(shell, [], { cwd: OUTPUT_ROOT, env: { ...process.env }, windowsHide: true });
   } catch (e) { throw new Error('启动本地终端失败: ' + e.message); }
   const id = 'local-' + (++localSeq);
-  const tab = { id: tabId, localChild: child, session: { protocol: 'local' } };
+  const tab = {
+    id: tabId, localChild: child, forwardServers: [],
+    session: { ...stripInlineCreds(session || {}), protocol: 'local' }
+  };
   tabs.set(tabId, tab);
   child.stdout.on('data', (b) => send('ssh:data', tabId, decodeTextBuffer(b)));
   child.stderr.on('data', (b) => send('ssh:data', tabId, decodeTextBuffer(b)));
@@ -945,6 +1094,7 @@ ipcMain.handle('local:spawn', async (_event, tabId) => {
     send('ssh:data', tabId, `\r\n\x1b[2m[本地终端已退出，代码 ${code}]\x1b[0m\r\n`);
     send('ssh:close', tabId);
     tabs.delete(tabId);
+    endLog(tabId);
   });
   child.on('error', (e) => send('ssh:error', tabId, e.message));
   send('ssh:progress', tabId, `本地终端已启动：${path.basename(shell)}`);
@@ -956,7 +1106,6 @@ ipcMain.on('local:write', (_event, tabId, data) => {
   if (tab && tab.localChild && tab.localChild.stdin) tab.localChild.stdin.write(data);
 });
 
-/* ---------------- RDP：调用系统远程桌面客户端 ---------------- */
 /* ---------------- FTP 文件传输 ---------------- */
 ipcMain.handle('ftp:connect', async (_event, tabId, session) => {
   if (!tabId || !session || !session.host) throw new Error('FTP 连接参数不完整');
@@ -996,15 +1145,72 @@ ipcMain.on('ftp:close', (_event, tabId) => {
   if (tabs.get(tabId) === tab) tabs.delete(tabId);
 });
 
+/* ---------------- RDP：生成 .rdp 配置文件后调用系统远程桌面客户端 ----------------
+   参照 Xshell「Connection > RDP」：窗口大小、智能重新连接、缩放、颜色质量、
+   密钥组合、驱动器共享、远程音频、录制、Windows 身份验证。
+   不写入明文密码；连接时由系统客户端提示凭据。 */
 ipcMain.handle('rdp:launch', async (_event, session) => {
   const host = String(session.host || '').trim();
   const port = Number(session.port) || 3389;
   if (!host) return { ok: false, error: '请填写主机地址' };
   if (process.platform !== 'win32') return { ok: false, error: 'RDP 一键启动仅支持 Windows，请手动使用远程桌面客户端连接 ' + host + ':' + port };
   const target = port === 3389 ? host : `${host}:${port}`;
+  const rdp = Fmt.optionDefaults(session).params.rdp;
+  const work = (() => {
+    try { return screen.getPrimaryDisplay().workAreaSize || { width: 1920, height: 1080 }; }
+    catch { return { width: 1920, height: 1080 }; }
+  })();
+  let screenMode = 1, w = work.width, h = work.height;
+  if (rdp.windowMode === 'fullscreen') screenMode = 2;
+  else if (rdp.windowMode === 'custom') { w = rdp.width; h = rdp.height; }
+  const audioMap = { noplay: 2, local: 0, remote: 1 };
+  const audio = Object.prototype.hasOwnProperty.call(audioMap, rdp.audioMode) ? audioMap[rdp.audioMode] : 2;
+  const lines = [
+    'full address:s:' + target,
+    'username:s:' + String(session.user || ''),
+    'screen mode id:i:' + screenMode,
+    'desktopwidth:i:' + Math.round(w),
+    'desktopheight:i:' + Math.round(h),
+    'smart reconnect:i:' + (rdp.smartReconnect ? 1 : 0),
+    'desktopscalefactor:i:' + rdp.scaling,
+    'devicescalefactor:i:100',
+    'session bpp:i:' + rdp.colorDepth,
+    'keyboardhook:i:' + (rdp.applyKeyCombinations ? 1 : 2),
+    'drivestoredirect:s:' + (rdp.shareDrives ? '*' : ''),
+    'audiomode:i:' + audio,
+    'audiocapturemode:i:' + (rdp.recordAudio ? 1 : 0),
+    'enablecredsspsupport:i:' + (rdp.windowsAuth ? 0 : 1),
+    'authentication level:i:0',
+    'redirectclipboard:i:1',
+    'prompt for credentials:i:1',
+    ''
+  ];
+  let file = '';
+  try {
+    fs.mkdirSync(CONFIG_DIR, { recursive: true });
+    file = path.join(CONFIG_DIR, 'rdp-' + Fmt.safeName(session.name || host) + '-' + Date.now() + '.rdp');
+    fs.writeFileSync(file, lines.join('\r\n'), 'utf8');
+  } catch (e) {
+    return { ok: false, error: '写入 RDP 配置失败：' + e.message };
+  }
   // 优先用 mstsc 图形客户端；RDP 是图形协议，无法在终端内渲染
-  spawn('mstsc', ['/v:' + target], { detached: true, windowsHide: false, stdio: 'ignore' }).on('error', () => {});
-  return { ok: true, message: '已启动系统远程桌面连接：' + target };
+  spawn('mstsc', [file], { detached: true, windowsHide: false, stdio: 'ignore' }).on('error', () => {});
+  // 连接日志：RDP 由系统客户端运行，仅记录启动事件与所用参数
+  const lg = Fmt.optionDefaults(session).logging;
+  if (lg.enabled) {
+    const key = 'rdp-' + String(session.id || host) + '-' + Date.now();
+    writeSessionLog(key,
+      '已启动远程桌面连接 ' + target + '（' + Math.round(w) + 'x' + Math.round(h) +
+      '，' + rdp.colorDepth + 'bit，缩放 ' + rdp.scaling + '%，配置文件 ' + file + '）' + os.EOL,
+      { session, logging: lg });
+    endLog(key);
+  }
+  return {
+    ok: true,
+    message: '已启动系统远程桌面连接：' + target + '（' + Math.round(w) + 'x' + Math.round(h) + '）',
+    file,
+    options: { width: Math.round(w), height: Math.round(h), scaling: rdp.scaling, colorDepth: rdp.colorDepth }
+  };
 });
 
 ipcMain.handle('net:deployConfig', async (_event, session, commands) => {
@@ -1060,4 +1266,8 @@ app.whenReady().then(() => {
 });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
-app.on('before-quit', () => { tabs.forEach((tab) => closeTabResources(tab)); tabs.clear(); });
+app.on('before-quit', () => {
+  tabs.forEach((tab) => closeTabResources(tab));
+  tabs.clear();
+  [...logStates.keys()].forEach((k) => endLog(k));
+});

@@ -215,6 +215,35 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   padding: 16px;
 }
 .modal-box.small { width: 460px; }
+/* 会话参数编辑：多标签 + 可滚动内容，避免字段过多导致弹窗超出屏幕 */
+.modal-box.session-box {
+  width: 720px; max-height: calc(100vh - 60px);
+  display: flex; flex-direction: column; gap: 0;
+}
+.session-box .modal-head { flex: none; }
+.session-box .modal-foot { flex: none; margin-top: 12px; }
+.form-tabs {
+  display: flex; flex: none; gap: 4px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--border); margin-bottom: 12px; padding-bottom: 6px;
+}
+.form-tab {
+  border: 1px solid transparent; background: transparent; color: var(--muted);
+  padding: 5px 11px; border-radius: 6px; font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+.form-tab:hover { background: var(--panel-2); color: var(--text); }
+.form-tab.active { color: var(--accent); border-color: var(--border); background: var(--panel-2); font-weight: 600; }
+.form-tab.hidden { display: none; }
+.form-tab-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 4px; }
+.form-tab-panel { display: none; }
+.form-tab-panel.active { display: block; }
+.form-section-title {
+  font-size: 12px; font-weight: 600; color: var(--accent);
+  border-left: 3px solid var(--accent); padding-left: 8px; margin: 12px 0 8px;
+}
+.form-tab-panel > p.muted { margin: 0 0 10px; line-height: 1.6; }
+.form-tab-panel .form-grid { margin-bottom: 8px; }
+.form-tab-panel code { font-family: Consolas, monospace; font-size: 11px; }
+.x-sep { align-self: center; flex: none; color: var(--muted); font-size: 12px; }
 .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; cursor: move; user-select: none; -webkit-user-select: none; }
 .modal-head h3 { margin: 0; font-size: 16px; cursor: move; }
 .modal-head button { border: 0; font-size: 20px; line-height: 1; cursor: pointer; }

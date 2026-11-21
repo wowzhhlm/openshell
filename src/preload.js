@@ -46,7 +46,9 @@ const SEND_CHANNELS = [
   'ssh:resize',
   'ssh:disconnect',
   'local:write',
-  'ftp:close'
+  'ftp:close',
+  'log:write',
+  'log:end'
 ];
 
 const ON_CHANNELS = [
@@ -94,7 +96,7 @@ contextBridge.exposeInMainWorld('openshell', {
 
   sshConnect: (tabId, session) => invoke('ssh:connect', tabId, session),
   telnetConnect: (tabId, session) => invoke('telnet:connect', tabId, session),
-  localSpawn: (tabId) => invoke('local:spawn', tabId),
+  localSpawn: (tabId, session) => invoke('local:spawn', tabId, session),
   rdpLaunch: (session) => invoke('rdp:launch', session),
   ftpConnect: (tabId, session) => invoke('ftp:connect', tabId, session),
   ftpList: (tabId, dir) => invoke('ftp:list', tabId, dir),
@@ -115,6 +117,9 @@ contextBridge.exposeInMainWorld('openshell', {
   sshResize: (tabId, cols, rows) => send('ssh:resize', tabId, cols, rows),
   sshDisconnect: (tabId) => send('ssh:disconnect', tabId),
   localWrite: (tabId, data) => send('local:write', tabId, data),
+  // 会话日志：主进程统一落盘；串口（Web Serial）数据在渲染层，需主动转发
+  logWrite: (tabId, text, meta) => send('log:write', tabId, text, meta),
+  logEnd: (tabId) => send('log:end', tabId),
 
   sftpReaddir: (tabId, dir) => invoke('sftp:readdir', tabId, dir),
   sftpUpload: (tabId, localPath, remotePath) => invoke('sftp:upload', tabId, localPath, remotePath),

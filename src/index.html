@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self';" />
-  <title>openshell 2.1 · 多协议终端与网络拓扑配置工具</title>
+  <title>openshell 2.2 · 多协议终端与网络拓扑配置工具</title>
   <link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css" />
   <link rel="stylesheet" href="styles.css" />
 </head>
@@ -25,6 +25,7 @@
             <hr />
             <button data-action="open-exports">打开导出目录</button>
             <button data-action="open-downloads">打开下载目录</button>
+            <button data-action="open-logs">打开会话日志目录</button>
           </div>
         </div>
         <div class="menu">
@@ -120,7 +121,7 @@
         <div class="workspace">
           <div id="terminal-host" class="terminal-host">
             <div id="empty-state" class="empty-state">
-              <h2>openshell 2.1</h2>
+              <h2>openshell 2.2</h2>
               <p>从左侧选择会话，或点击“新建会话”开始连接。</p>
               <p class="muted">支持 SSH、Telnet、RLOGIN、SFTP、FTP、RDP、串口、本地终端与原始 TCP。</p>
               <p class="muted">内置网络拓扑绘制、交换机配置自动生成、Linux 命令查询。</p>
@@ -145,53 +146,215 @@
         </div>
         <footer class="statusbar">
           <span id="status-left">就绪</span>
-          <span id="status-right">openshell 2.1 · MIT · 输出目录 D:\openshell</span>
+          <span id="status-right">openshell 2.2 · MIT · 输出目录 D:\openshell</span>
         </footer>
       </main>
     </div>
   </div>
 
-  <!-- 会话编辑 -->
+  <!-- 会话编辑：常规 / 串口 / RLOGIN / RDP / 保持活动 / 日志 -->
   <div id="session-modal" class="modal hidden">
-    <div class="modal-box">
+    <div class="modal-box session-box">
       <div class="modal-head"><h3 id="session-modal-title">新建会话</h3><button class="modal-close">×</button></div>
-      <div class="form-grid">
-        <label>会话名称<input id="f-name" type="text" placeholder="例如：生产服务器" /></label>
-        <label>分组<input id="f-group" type="text" placeholder="例如：生产环境" /></label>
-        <label>协议
-          <select id="f-protocol">
-            <option value="ssh">SSH（默认端口 22）</option>
-            <option value="telnet">Telnet（默认端口 23）</option>
-            <option value="rlogin">RLOGIN（默认端口 513）</option>
-            <option value="sftp">SFTP 文件传输（默认端口 22）</option>
-            <option value="ftp">FTP 文件传输（默认端口 21）</option>
-            <option value="rdp">RDP 远程桌面（默认端口 3389）</option>
-            <option value="serial">Serial 串口（本地 COM 口）</option>
-            <option value="local">Local 本地终端（系统 Shell）</option>
-            <option value="raw">原始 TCP（自定义端口）</option>
-          </select>
-        </label>
-        <label>主机<input id="f-host" type="text" placeholder="example.com 或 IP 地址" /></label>
-        <label>端口<input id="f-port" type="number" value="22" min="1" max="65535" /></label>
-        <label id="lbl-user">用户名<input id="f-user" type="text" placeholder="root" /></label>
-        <label id="lbl-auth">认证方式
-          <select id="f-auth">
-            <option value="password">密码</option>
-            <option value="privatekey">私钥</option>
-          </select>
-        </label>
-        <label id="lbl-password">密码
-          <span class="input-row"><input id="f-password" type="password" autocomplete="new-password" /><button id="btn-toggle-password" class="toggle-pw" type="button" title="显示/隐藏密码">👁</button></span>
-        </label>
-        <label id="lbl-key" class="hidden">私钥文件
-          <span class="input-row"><input id="f-keyfile" type="text" placeholder="选择 .pem / .key 文件" /><button id="btn-pick-key">选择</button></span>
-        </label>
-        <label id="lbl-passphrase">密钥口令（可选）
-          <span class="input-row"><input id="f-passphrase" type="password" autocomplete="new-password" /><button id="btn-toggle-passphrase" class="toggle-pw" type="button" title="显示/隐藏口令">👁</button></span>
-        </label>
+      <div class="form-tabs" id="session-tabs">
+        <button type="button" class="form-tab active" data-tab="general">常规</button>
+        <button type="button" class="form-tab" data-tab="serial" id="ftab-serial">串口</button>
+        <button type="button" class="form-tab" data-tab="rlogin" id="ftab-rlogin">RLOGIN</button>
+        <button type="button" class="form-tab" data-tab="rdp" id="ftab-rdp">RDP</button>
+        <button type="button" class="form-tab" data-tab="keepalive">保持活动</button>
+        <button type="button" class="form-tab" data-tab="logging">日志</button>
       </div>
-      <p id="protocol-hint" class="muted cred-hint">SSH：加密终端连接，支持密码与私钥认证。</p>
-      <p id="cred-hint" class="muted cred-hint">凭据将加密保存到本机，不写入会话文件。</p>
+      <div class="form-tab-body">
+        <!-- 常规 -->
+        <div class="form-tab-panel active" data-panel="general">
+          <div class="form-grid">
+            <label>会话名称<input id="f-name" type="text" placeholder="例如：生产服务器" /></label>
+            <label>分组<input id="f-group" type="text" placeholder="例如：生产环境" /></label>
+            <label>协议
+              <select id="f-protocol">
+                <option value="ssh">SSH（默认端口 22）</option>
+                <option value="telnet">Telnet（默认端口 23）</option>
+                <option value="rlogin">RLOGIN（默认端口 513）</option>
+                <option value="sftp">SFTP 文件传输（默认端口 22）</option>
+                <option value="ftp">FTP 文件传输（默认端口 21）</option>
+                <option value="rdp">RDP 远程桌面（默认端口 3389）</option>
+                <option value="serial">Serial 串口（本地 COM 口）</option>
+                <option value="local">Local 本地终端（系统 Shell）</option>
+                <option value="raw">原始 TCP（自定义端口）</option>
+              </select>
+            </label>
+            <label>主机<input id="f-host" type="text" placeholder="example.com 或 IP 地址" /></label>
+            <label>端口<input id="f-port" type="number" value="22" min="1" max="65535" /></label>
+            <label id="lbl-user">用户名<input id="f-user" type="text" placeholder="root" /></label>
+            <label id="lbl-auth">认证方式
+              <select id="f-auth">
+                <option value="password">密码</option>
+                <option value="privatekey">私钥</option>
+              </select>
+            </label>
+            <label id="lbl-password">密码
+              <span class="input-row"><input id="f-password" type="password" autocomplete="new-password" /><button id="btn-toggle-password" class="toggle-pw" type="button" title="显示/隐藏密码">👁</button></span>
+            </label>
+            <label id="lbl-key" class="hidden">私钥文件
+              <span class="input-row"><input id="f-keyfile" type="text" placeholder="选择 .pem / .key 文件" /><button id="btn-pick-key">选择</button></span>
+            </label>
+            <label id="lbl-passphrase">密钥口令（可选）
+              <span class="input-row"><input id="f-passphrase" type="password" autocomplete="new-password" /><button id="btn-toggle-passphrase" class="toggle-pw" type="button" title="显示/隐藏口令">👁</button></span>
+            </label>
+          </div>
+          <p id="protocol-hint" class="muted cred-hint">SSH：加密终端连接，支持密码与私钥认证。</p>
+          <p id="cred-hint" class="muted cred-hint">凭据将加密保存到本机，不写入会话文件。</p>
+        </div>
+
+        <!-- 串口参数（参照 Xshell「连接 > 串口」）-->
+        <div class="form-tab-panel" data-panel="serial">
+          <p class="muted">参照 Xshell「连接 &gt; 串口」。连接时会弹出系统串口选择框，请选中与此处的端口号一致的设备。</p>
+          <div class="form-grid">
+            <label>端口号(P)
+              <input id="f-serial-port" type="text" list="serial-port-list" value="COM1" placeholder="COM1" />
+              <datalist id="serial-port-list">
+                <option value="COM1"></option><option value="COM2"></option><option value="COM3"></option>
+                <option value="COM4"></option><option value="COM5"></option><option value="COM6"></option>
+                <option value="COM7"></option><option value="COM8"></option><option value="COM9"></option>
+                <option value="COM10"></option><option value="COM11"></option><option value="COM12"></option>
+                <option value="COM13"></option><option value="COM14"></option><option value="COM15"></option>
+                <option value="COM16"></option><option value="COM17"></option><option value="COM18"></option>
+                <option value="COM19"></option><option value="COM20"></option>
+              </datalist>
+            </label>
+            <label>波特率(B)
+              <select id="f-serial-baud">
+                <option value="300">300</option><option value="1200">1200</option>
+                <option value="2400">2400</option><option value="4800">4800</option>
+                <option value="9600">9600</option><option value="19200">19200</option>
+                <option value="38400">38400</option><option value="57600">57600</option>
+                <option value="115200" selected>115200</option><option value="230400">230400</option>
+                <option value="460800">460800</option><option value="921600">921600</option>
+              </select>
+            </label>
+            <label>数据位(D)
+              <select id="f-serial-databits">
+                <option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8" selected>8</option>
+              </select>
+            </label>
+            <label>停止位(S)
+              <select id="f-serial-stopbits"><option value="1" selected>1</option><option value="2">2</option></select>
+            </label>
+            <label>奇偶校验(A)
+              <select id="f-serial-parity">
+                <option value="none" selected>无</option><option value="even">偶</option><option value="odd">奇</option>
+                <option value="mark">标记</option><option value="space">空格</option>
+              </select>
+            </label>
+            <label>流控制(F)
+              <select id="f-serial-flow">
+                <option value="none" selected>无</option><option value="hardware">硬件（RTS/CTS）</option><option value="software">软件（XON/XOFF）</option>
+              </select>
+            </label>
+          </div>
+          <p class="muted">浏览器 Web Serial 标准仅支持 7/8 数据位、无/偶/奇校验、无/硬件流控制；若选择不受支持的组合，会按最接近的有效值打开并在终端提示。</p>
+        </div>
+
+        <!-- RLOGIN 参数（参照 Xshell「连接 > RLOGIN」）-->
+        <div class="form-tab-panel" data-panel="rlogin">
+          <p class="muted">参照 Xshell「连接 &gt; RLOGIN」。终端速度写入 RFC 1258 登录首包的 speed 字段。</p>
+          <div class="form-grid">
+            <label>终端速度(T)
+              <select id="f-rlogin-speed">
+                <option value="300">300</option><option value="1200">1200</option>
+                <option value="2400">2400</option><option value="4800">4800</option>
+                <option value="9600">9600</option><option value="19200">19200</option>
+                <option value="38400" selected>38400</option><option value="57600">57600</option>
+                <option value="115200">115200</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <!-- RDP 参数（参照 Xshell「Connection > RDP」）-->
+        <div class="form-tab-panel" data-panel="rdp">
+          <p class="muted">参照 Xshell「Connection &gt; RDP」。参数写入临时 .rdp 配置文件后交给系统「远程桌面连接」(mstsc) 启动。</p>
+          <div class="form-section-title">显示</div>
+          <div class="form-grid">
+            <label>窗口大小(W)
+              <select id="f-rdp-window">
+                <option value="workspace" selected>Work Space（当前工作区）</option>
+                <option value="fullscreen">全屏</option>
+                <option value="custom">自定义分辨率</option>
+              </select>
+            </label>
+            <label>宽 × 高（自定义时生效）
+              <span class="input-row"><input id="f-rdp-width" type="number" value="3120" min="320" max="16384" /><span class="x-sep">×</span><input id="f-rdp-height" type="number" value="2080" min="240" max="16384" /></span>
+            </label>
+            <label>改变屏幕大小(C)
+              <select id="f-rdp-reconnect">
+                <option value="smart" selected>使用智能重新连接</option>
+                <option value="keep">保持原窗口大小</option>
+              </select>
+            </label>
+            <label>屏幕缩放(L)
+              <select id="f-rdp-scaling">
+                <option value="100">Auto(100%)</option><option value="125">Auto(125%)</option>
+                <option value="150">Auto(150%)</option><option value="175">Auto(175%)</option>
+                <option value="200" selected>Auto(200%)</option>
+              </select>
+            </label>
+            <label>颜色质量(Q)
+              <select id="f-rdp-depth">
+                <option value="32" selected>Highest Quality (32 bit)</option>
+                <option value="24">True Color (24 bit)</option>
+                <option value="16">High Color (16 bit)</option>
+                <option value="15">High Color (15 bit)</option>
+              </select>
+            </label>
+          </div>
+          <div class="form-section-title">设备 · 声音 · 高级</div>
+          <div class="form-grid">
+            <label class="check"><input id="f-rdp-keys" type="checkbox" checked /> 在远程计算机上应用密钥组合(K)</label>
+            <label class="check"><input id="f-rdp-drives" type="checkbox" /> 与远程计算机分享该计算机的驱动器(S)</label>
+            <label>远程音频播放(R)
+              <select id="f-rdp-audio">
+                <option value="noplay" selected>Do not play（不播放）</option>
+                <option value="local">在此计算机上播放</option>
+                <option value="remote">在远程计算机上播放</option>
+              </select>
+            </label>
+            <label class="check"><input id="f-rdp-record" type="checkbox" checked /> 从这台电脑录制(E)</label>
+            <label class="check"><input id="f-rdp-winauth" type="checkbox" /> 使用 Windows 身份验证(A)</label>
+          </div>
+          <p class="muted">出于安全考虑，.rdp 文件中不写入明文密码；连接时由系统客户端自行提示凭据。</p>
+        </div>
+
+        <!-- 保持活动状态（参照 Xshell「连接 > 保持活动状态」）-->
+        <div class="form-tab-panel" data-panel="keepalive">
+          <p class="muted">参照 Xshell「连接 &gt; 保持活动状态」。适用于 SSH / Telnet / RLOGIN / 原始 TCP / FTP 等长连接。</p>
+          <div class="form-section-title">保持活动状态</div>
+          <div class="form-grid">
+            <label class="check"><input id="f-ka-enabled" type="checkbox" checked /> 连接会话期间发送保持活动状态消息(S)</label>
+            <label>间隔(I)（秒）<input id="f-ka-interval" type="number" value="60" min="1" max="3600" /></label>
+            <label class="check"><input id="f-ka-idle" type="checkbox" /> 网络空闲时发送字符串(R)</label>
+            <label>间隔(E)（秒）<input id="f-ka-idle-interval" type="number" value="0" min="0" max="3600" /></label>
+            <label>字符串(G)<input id="f-ka-idle-string" type="text" placeholder="留空则不发送；可用 \n 表示换行" /></label>
+            <label class="check"><input id="f-ka-tcp" type="checkbox" /> 网络为空闲状态时发送 TCP 保持活动数据包(T)</label>
+          </div>
+          <p class="muted">「保持活动消息」对 SSH 使用协议层 keepalive；「TCP 保持活动」在底层 socket 上启用 SO_KEEPALIVE；「空闲发送字符串」在设定秒数内未收到任何数据时发送指定字符。</p>
+        </div>
+
+        <!-- 连接日志 -->
+        <div class="form-tab-panel" data-panel="logging">
+          <p class="muted">把本会话的终端输出、连接过程与错误写入本地日志文件，便于事后排查与审计。</p>
+          <div class="form-section-title">连接日志</div>
+          <div class="form-grid">
+            <label class="check"><input id="f-log-enabled" type="checkbox" /> 启用本会话的连接日志</label>
+            <label>写入方式
+              <select id="f-log-mode"><option value="append" selected>追加到已有日志</option><option value="overwrite">每次连接新建文件</option></select>
+            </label>
+            <label class="check"><input id="f-log-timestamp" type="checkbox" checked /> 每行添加时间戳</label>
+            <label class="check"><input id="f-log-input" type="checkbox" /> 同时记录键盘输入（可能含敏感信息）</label>
+          </div>
+          <p class="muted">日志保存在「文件 → 打开日志目录」（默认 <code>D:\openshell\日志</code>），文件名含会话名与连接时间。密码等凭据不会主动记录，但远程回显的内容无法过滤，请自行妥善保管日志文件。</p>
+        </div>
+      </div>
       <div class="modal-foot">
         <button id="btn-session-delete" class="danger hidden">删除</button>
         <span class="spacer"></span>
@@ -287,12 +450,15 @@
       <p class="muted">按公开产品文档与常见配置格式整理，仅供选型参考，不代表逐版本精确核对。</p>
       <div class="compare-scroll">
         <table class="compare-table">
-          <thead><tr><th>功能类别</th><th>OpenShell 1.4</th><th>Xshell 8</th><th>SecureCRT 9</th></tr></thead>
+          <thead><tr><th>功能类别</th><th>OpenShell 2.2</th><th>Xshell 8</th><th>SecureCRT 9</th></tr></thead>
           <tbody>
             <tr><td>SSH 终端</td><td class="yes">支持（密码 / 私钥）</td><td class="yes">支持</td><td class="yes">支持</td></tr>
             <tr><td>Telnet</td><td class="yes">支持（自动登录可选）</td><td class="yes">支持</td><td class="yes">支持</td></tr>
             <tr><td>SFTP 文件传输</td><td class="yes">支持（独立模式 / 面板）</td><td class="yes">支持</td><td class="yes">支持</td></tr>
-            <tr><td>原始 TCP / 串口</td><td class="yes">原始 TCP / Web 串口</td><td class="yes">Rlogin / 串口</td><td class="yes">串口 /  RAW</td></tr>
+            <tr><td>原始 TCP / 串口</td><td class="yes">原始 TCP / Web 串口（波特率等参数可配）</td><td class="yes">Rlogin / 串口</td><td class="yes">串口 /  RAW</td></tr>
+            <tr><td>协议参数</td><td class="yes">串口 / RLOGIN / RDP 参数可配</td><td class="yes">支持</td><td class="yes">支持</td></tr>
+            <tr><td>保持活动状态</td><td class="yes">协议层 / 空闲字符串 / TCP KeepAlive</td><td class="yes">支持</td><td class="yes">支持</td></tr>
+            <tr><td>连接日志</td><td class="yes">按会话记录、时间戳、追加/新建</td><td class="yes">支持</td><td class="yes">支持</td></tr>
             <tr><td>会话导入</td><td class="yes">Xshell .xsh、SecureCRT .ini、自有 JSON</td><td class="part">仅自有格式</td><td class="part">仅自有格式</td></tr>
             <tr><td>会话导出</td><td class="yes">三种格式互转，不写密码</td><td class="part">自有格式</td><td class="part">自有格式</td></tr>
             <tr><td>批量导入 / 导出</td><td class="yes">多文件 / 目录递归</td><td class="part">会话管理器集中管理</td><td class="part">会话管理器集中管理</td></tr>
@@ -324,6 +490,7 @@
         <label>字体大小<input id="s-fontsize" type="number" value="14" min="10" max="24" /></label>
         <label>回滚行数<input id="s-scrollback" type="number" value="5000" min="1000" max="50000" /></label>
         <label class="check"><input id="s-copyonselect" type="checkbox" /> 鼠标选中即复制</label>
+        <label class="check"><input id="s-logdefault" type="checkbox" /> 新建会话默认启用连接日志</label>
       </div>
       <p class="muted">终端操作：右键菜单可复制/粘贴/全选/重连；快捷键 Ctrl+Shift+C 复制、Ctrl+Shift+V 粘贴、Ctrl+Shift+A 全选。</p>
       <div class="modal-foot"><span class="spacer"></span><button id="btn-settings-save" class="primary">保存</button></div>

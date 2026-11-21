@@ -2,6 +2,8 @@ node_modules/
 dist/
 导出/
 下载/
+日志/
+配置/
 *.log
 .DS_Store
 Thumbs.db

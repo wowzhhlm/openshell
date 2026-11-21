@@ -295,6 +295,108 @@ function renderSessions() {
     });
   });
 }
+/* ---------------- 会话高级参数（串口 / RLOGIN / RDP / 保持活动 / 日志） ----------------
+   与 session-format.js 的 optionDefaults() 共用同一套默认值与校验规则，
+   UI 只负责读写表单；实际连接参数由主进程再次校验后使用。 */
+function defaultLogging() {
+  return { enabled: !!getPrefs().loggingDefault, mode: 'append', timestamp: true, logInput: false };
+}
+function setOpt(id, value) { const el = $(id); if (el) el.value = value; }
+function setOptChecked(id, value) { const el = $(id); if (el) el.checked = !!value; }
+function optNum(id, def) { const el = $(id); return el ? (Number(el.value) || def) : def; }
+function optVal(id, def) { const el = $(id); return el ? el.value : def; }
+function optChk(id, def) { const el = $(id); return el ? !!el.checked : !!def; }
+
+function fillSessionOptions(s) {
+  const o = Fmt.optionDefaults(s || {});
+  const ser = o.params.serial, rl = o.params.rlogin, rdp = o.params.rdp;
+  const ka = o.keepalive, lg = o.logging;
+  setOpt('f-serial-port', ser.port);
+  setOpt('f-serial-baud', ser.baudRate);
+  setOpt('f-serial-databits', ser.dataBits);
+  setOpt('f-serial-stopbits', ser.stopBits);
+  setOpt('f-serial-parity', ser.parity);
+  setOpt('f-serial-flow', ser.flowControl);
+  setOpt('f-rlogin-speed', rl.terminalSpeed);
+  setOpt('f-rdp-window', rdp.windowMode);
+  setOpt('f-rdp-width', rdp.width);
+  setOpt('f-rdp-height', rdp.height);
+  setOpt('f-rdp-reconnect', rdp.smartReconnect ? 'smart' : 'keep');
+  setOpt('f-rdp-scaling', rdp.scaling);
+  setOpt('f-rdp-depth', rdp.colorDepth);
+  setOptChecked('f-rdp-keys', rdp.applyKeyCombinations);
+  setOptChecked('f-rdp-drives', rdp.shareDrives);
+  setOpt('f-rdp-audio', rdp.audioMode);
+  setOptChecked('f-rdp-record', rdp.recordAudio);
+  setOptChecked('f-rdp-winauth', rdp.windowsAuth);
+  setOptChecked('f-ka-enabled', ka.enabled);
+  setOpt('f-ka-interval', ka.interval);
+  setOptChecked('f-ka-idle', ka.sendStringOnIdle);
+  setOpt('f-ka-idle-interval', ka.idleInterval);
+  setOpt('f-ka-idle-string', ka.idleString);
+  setOptChecked('f-ka-tcp', ka.tcpKeepAlive);
+  setOpt('f-log-mode', lg.mode);
+  setOptChecked('f-log-timestamp', lg.timestamp);
+  setOptChecked('f-log-input', lg.logInput);
+  // 新建会话取全局默认；编辑会话取会话自身配置
+  setOptChecked('f-log-enabled', s && s.logging ? lg.enabled : !!getPrefs().loggingDefault);
+}
+function readSessionOptions() {
+  return {
+    params: {
+      serial: {
+        port: (optVal('f-serial-port', 'COM1') || 'COM1').trim().slice(0, 32),
+        baudRate: optNum('f-serial-baud', 115200),
+        dataBits: optNum('f-serial-databits', 8),
+        stopBits: optNum('f-serial-stopbits', 1),
+        parity: optVal('f-serial-parity', 'none'),
+        flowControl: optVal('f-serial-flow', 'none')
+      },
+      rlogin: { terminalSpeed: optNum('f-rlogin-speed', 38400) },
+      rdp: {
+        windowMode: optVal('f-rdp-window', 'workspace'),
+        width: optNum('f-rdp-width', 3120),
+        height: optNum('f-rdp-height', 2080),
+        smartReconnect: optVal('f-rdp-reconnect', 'smart') === 'smart',
+        scaling: optNum('f-rdp-scaling', 200),
+        colorDepth: optNum('f-rdp-depth', 32),
+        applyKeyCombinations: optChk('f-rdp-keys', true),
+        shareDrives: optChk('f-rdp-drives', false),
+        audioMode: optVal('f-rdp-audio', 'noplay'),
+        recordAudio: optChk('f-rdp-record', true),
+        windowsAuth: optChk('f-rdp-winauth', false)
+      }
+    },
+    keepalive: {
+      enabled: optChk('f-ka-enabled', true),
+      interval: optNum('f-ka-interval', 60),
+      sendStringOnIdle: optChk('f-ka-idle', false),
+      idleInterval: optNum('f-ka-idle-interval', 0),
+      idleString: optVal('f-ka-idle-string', ''),
+      tcpKeepAlive: optChk('f-ka-tcp', false)
+    },
+    logging: {
+      enabled: optChk('f-log-enabled', false),
+      mode: optVal('f-log-mode', 'append'),
+      timestamp: optChk('f-log-timestamp', true),
+      logInput: optChk('f-log-input', false)
+    }
+  };
+}
+function initSessionTabs() {
+  document.querySelectorAll('#session-tabs .form-tab').forEach((btn) => {
+    btn.onclick = () => {
+      const target = btn.dataset.tab;
+      document.querySelectorAll('#session-tabs .form-tab').forEach((b) => b.classList.toggle('active', b === btn));
+      document.querySelectorAll('#session-modal .form-tab-panel').forEach((p) => p.classList.toggle('active', p.dataset.panel === target));
+    };
+  });
+}
+function switchSessionTab(name) {
+  const btn = document.querySelector(`#session-tabs .form-tab[data-tab="${name}"]`);
+  if (btn && !btn.classList.contains('hidden')) btn.click();
+}
+
 function openSessionModal(id = null) {
   editingSessionId = id;
   const s = id ? getSessions().find((x) => x.id === id) : null;
@@ -316,7 +418,9 @@ function openSessionModal(id = null) {
   });
   $('cred-hint').textContent = s ? '凭据已加密保存，留空表示不修改。' : '凭据将加密保存到本机，不写入会话文件。';
   $('btn-session-delete').classList.toggle('hidden', !s);
+  fillSessionOptions(s);
   toggleProtocolFields();
+  switchSessionTab('general');
   $('session-modal').classList.remove('hidden');
 }
 function toggleAuthFields() {
@@ -341,12 +445,20 @@ function toggleProtocolFields() {
     rlogin: 'RLOGIN：明文远程登录（RFC 1258），端口 513，安全性低，建议仅在可信网络使用。',
     sftp: 'SFTP：仅打开文件传输面板，不启动交互式 Shell。',
     ftp: 'FTP：传统文件传输协议（端口 21），明文传输，建议仅在可信网络使用。',
-    rdp: 'RDP：Windows 远程桌面图形协议，将调用系统“远程桌面连接”程序打开，无法在终端内显示。',
-    serial: 'Serial 串口：通过浏览器 Web Serial API 连接本地 COM 口，连接时请在弹窗中选择设备。',
+    rdp: 'RDP：Windows 远程桌面图形协议，按「RDP」页参数生成配置后调用系统“远程桌面连接”打开，无法在终端内显示。',
+    serial: 'Serial 串口：通过浏览器 Web Serial API 连接本地 COM 口，请在「串口」页设置端口号、波特率等参数。',
     local: 'Local 本地终端：在本机启动系统 Shell（Windows 为 cmd），命令直接在本机执行。',
     raw: '原始 TCP：建立裸连接并透传字符，不做 Telnet 选项协商。'
   };
   $('protocol-hint').textContent = hints[p] || hints.ssh;
+  // 协议专属参数标签按需显示；若当前停留在被隐藏的标签则回到「常规」
+  const protoTabs = { serial: 'ftab-serial', rlogin: 'ftab-rlogin', rdp: 'ftab-rdp' };
+  Object.entries(protoTabs).forEach(([proto, elId]) => {
+    const b = $(elId);
+    if (b) b.classList.toggle('hidden', p !== proto);
+  });
+  const activeBtn = document.querySelector('#session-tabs .form-tab.active');
+  if (activeBtn && activeBtn.classList.contains('hidden')) switchSessionTab('general');
   toggleAuthFields();
 }
 
@@ -486,6 +598,7 @@ function closeTab(id) {
   const t = tabs.get(id);
   if (!t) return;
   if (t.type === 'ssh') api.sshDisconnect(t.id);
+  try { api.logEnd(t.id); } catch {}
   if (t.onDataDisposable) { try { t.onDataDisposable.dispose(); } catch {} }
   if (t.serialWriter) { try { t.serialWriter.releaseLock(); } catch {} }
   if (t.serial) { t.serialReading = false; try { t.serial.close(); } catch {} }
@@ -650,7 +763,8 @@ function findReusableTab(session) {
 async function connectIntoTab(tab, session, protocol) {
   const term = tab.term;
   // 临时内联凭据只用于本次 IPC；绝不留在 tab.session 中，避免随标签常驻内存
-  tab.session = stripInlineCreds(session);
+  const logging = session.logging || defaultLogging();
+  tab.session = stripInlineCreds({ ...session, logging });
   tab.sessionKey = session.id || `${protocol}|${session.host}|${session.port}|${session.user}`;
   tab.connState = 'connecting';
   tab.attempts = (tab.attempts || 0) + 1;
@@ -663,7 +777,7 @@ async function connectIntoTab(tab, session, protocol) {
     term.writeln(`${cyan}◆ 第 ${tab.attempts} 次连接尝试${reset} ${dim}${new Date().toLocaleTimeString()}${reset}`);
     term.writeln('\x1b[90m────────────────────────────────────────\x1b[0m');
   } else {
-    let ver = '2.1';
+    let ver = '2.2';
     try { ver = await api.appVersion(); } catch (_) {}
     term.writeln(`${cyan}OpenShell ${ver}${reset} · ${protocol.toUpperCase()}`);
     term.writeln('Copyright (c) 2026 OpenShell contributors. All rights reserved.');
@@ -674,8 +788,13 @@ async function connectIntoTab(tab, session, protocol) {
   status(`正在连接 ${session.host}`);
   // 释放旧的数据监听，避免重连后重复绑定导致输入被发送两次
   if (tab.onDataDisposable) { try { tab.onDataDisposable.dispose(); } catch {} }
-  tab.onDataDisposable = term.onData((data) => api.sshWrite(tab.id, data));
-  const payload = { ...session, protocol, forwardRules: getForwarding() };
+  tab.onDataDisposable = term.onData((data) => {
+    api.sshWrite(tab.id, data);
+    if (logging.enabled && logging.logInput && api.logWrite) {
+      api.logWrite(tab.id, data, { session: tab.session, logging });
+    }
+  });
+  const payload = { ...session, protocol, logging, forwardRules: getForwarding() };
   try {
     let result;
     if (['telnet', 'raw', 'rlogin'].includes(protocol)) result = await api.telnetConnect(tab.id, payload);
@@ -726,7 +845,8 @@ async function connectSession(session) {
   // 首次连接先输入密码/口令并询问是否保存；取消则不发起连接
   const prepared = await ensureCredentialBeforeConnect(session, protocol);
   if (prepared === null) { status('已取消连接'); return; }
-  session = prepared;
+  // 未显式配置的旧会话：日志开关取全局偏好，保证连接参数完整
+  session = { ...prepared, logging: prepared.logging || defaultLogging() };
   // RDP 是图形协议，无法在终端渲染，调用系统远程桌面客户端
   if (protocol === 'rdp') {
     try {
@@ -736,8 +856,8 @@ async function connectSession(session) {
     } catch (e) { alert('RDP 启动失败：' + (e.message || e)); }
     return;
   }
-  // 串口走 Web Serial，单独处理
-  if (protocol === 'serial') { await openSerialTab(); return; }
+  // 串口走 Web Serial，按会话里的端口/波特率等参数打开
+  if (protocol === 'serial') { await openSerialTab(session); return; }
   // 本地终端：启动系统 shell
   if (protocol === 'local') {
     const tab = createTab('本地终端', 'local');
@@ -748,8 +868,13 @@ async function connectSession(session) {
     term.writeln('\x1b[36mopenshell · 本地终端\x1b[0m');
     term.writeln('\x1b[2m输入 exit 退出；本地终端直接在你的电脑上执行命令。\x1b[0m\r\n');
     status('正在启动本地终端…');
-    tab.onDataDisposable = term.onData((data) => api.localWrite(tab.id, data));
-    try { await api.localSpawn(tab.id); tab.connState = 'connected'; }
+    tab.onDataDisposable = term.onData((data) => {
+      api.localWrite(tab.id, data);
+      if (session.logging && session.logging.enabled && session.logging.logInput && api.logWrite) {
+        api.logWrite(tab.id, data, { session: tab.session, logging: session.logging });
+      }
+    });
+    try { await api.localSpawn(tab.id, session); tab.connState = 'connected'; }
     catch (e) { tab.connState = 'failed'; term.writeln('\x1b[31m[启动失败] ' + String(e && e.message ? e.message : e) + '\x1b[0m'); status('启动失败'); }
     refreshSessionOps();
     return;
@@ -892,24 +1017,44 @@ function renderForwarding() {
   });
 }
 
-/* ---------------- 串口 ---------------- */
-async function openSerialTab() {
+/* ---------------- 串口（Web Serial，参数来自会话设置） ---------------- */
+async function openSerialTab(session) {
   if (!navigator.serial) {
     alert('当前 Electron 版本不支持 Web Serial API。');
     return;
   }
+  const s = session || {};
+  const ser = Fmt.optionDefaults(s).params.serial;
+  const logging = s.logging || defaultLogging();
   try {
     const port = await navigator.serial.requestPort();
-    await port.open({ baudRate: 115200 });
-    const tab = createTab(`串口 ${Date.now().toString().slice(-4)}`, 'serial');
+    // Web Serial 标准仅支持 7/8 数据位、none/even/odd 校验、none/hardware 流控制
+    const dataBits = (ser.dataBits === 7 || ser.dataBits === 8) ? ser.dataBits : 8;
+    const parity = ['none', 'even', 'odd'].includes(ser.parity) ? ser.parity : 'none';
+    const flowControl = ser.flowControl === 'hardware' ? 'hardware' : 'none';
+    const notes = [];
+    if (dataBits !== ser.dataBits) notes.push(`数据位 ${ser.dataBits} 不受 Web Serial 支持，已按 ${dataBits} 打开`);
+    if (parity !== ser.parity) notes.push(`校验「${ser.parity}」不受支持，已按「${parity}」打开`);
+    if (flowControl !== ser.flowControl) notes.push(`流控制「${ser.flowControl}」不受支持，已按「${flowControl}」打开`);
+    await port.open({ baudRate: ser.baudRate, dataBits, stopBits: ser.stopBits, parity, flowControl });
+    const label = s.name ? `串口 · ${s.name}` : `串口 ${Date.now().toString().slice(-4)}`;
+    const tab = createTab(label, 'serial');
+    tab.session = { ...stripInlineCreds(s), protocol: 'serial', logging };
     tab.serial = port;
-    tab.term.writeln('\x1b[32mSerial port opened at 115200 8N1.\x1b[0m');
+    const meta = { session: tab.session, logging };
+    const summary = `Serial ${ser.port} @ ${ser.baudRate} ${dataBits}${parity === 'none' ? 'N' : parity[0].toUpperCase()}${ser.stopBits} 已打开`;
+    tab.term.writeln('\x1b[32m' + summary + '\x1b[0m');
+    notes.forEach((n) => tab.term.writeln('\x1b[33m[提示] ' + n + '\x1b[0m'));
+    if (logging.enabled && api.logWrite) {
+      api.logWrite(tab.id, summary + '\r\n' + notes.map((n) => '[提示] ' + n).join('\r\n') + (notes.length ? '\r\n' : ''), meta);
+    }
     const decoder = new TextDecoder();
     const writer = port.writable.getWriter();
     tab.serialWriter = writer;
     tab.serialReading = true;
     tab.onDataDisposable = tab.term.onData((data) => {
       writer.write(new TextEncoder().encode(data)).catch(() => {});
+      if (logging.enabled && logging.logInput && api.logWrite) api.logWrite(tab.id, data, meta);
     });
     (async () => {
       while (tab.serialReading && port.readable) {
@@ -918,10 +1063,13 @@ async function openSerialTab() {
           while (tab.serialReading) {
             const { value, done } = await reader.read();
             if (done) break;
-            if (tab.term) tab.term.write(decoder.decode(value, { stream: true }));
+            const chunk = decoder.decode(value, { stream: true });
+            if (tab.term) tab.term.write(chunk);
+            if (logging.enabled && api.logWrite) api.logWrite(tab.id, chunk, meta);
           }
         } catch (e) {
           if (tab.term) tab.term.writeln(`\r\n\x1b[31m[Serial] ${e.message}\x1b[0m`);
+          if (logging.enabled && api.logWrite) api.logWrite(tab.id, '[ERROR] ' + e.message + '\r\n', meta);
         } finally {
           try { reader.releaseLock(); } catch {}
         }
@@ -949,6 +1097,7 @@ function openSettings() {
   $('s-fontsize').value = p.fontSize;
   $('s-scrollback').value = p.scrollback;
   if ($('s-copyonselect')) $('s-copyonselect').checked = !!p.copyOnSelect;
+  if ($('s-logdefault')) $('s-logdefault').checked = !!p.loggingDefault;
   $('settings-modal').classList.remove('hidden');
 }
 
@@ -1136,7 +1285,7 @@ async function doBatchExport() {
 }
 
 function normalizeImported(list) {
-  return list.filter((s) => s && s.host && s.user).map((s) => ({
+  return list.filter((s) => s && s.host && s.user).map((s) => Fmt.withOptions({
     id: `s-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
     name: String(s.name || s.host).slice(0, 80),
     group: String(s.group || '').slice(0, 60),
@@ -1148,7 +1297,7 @@ function normalizeImported(list) {
     keyfile: String(s.keyfile || '').slice(0, 500),
     credentialId: '',
     needsCredential: true
-  }));
+  }, s));
 }
 /* 把一批文件解析成会话；不写盘。xtsEncrypted 表示命中 Xshell 加密归档 */
 function parseImportFiles(files) {
@@ -1406,6 +1555,8 @@ $('btn-session-save').onclick = async () => {
     credentialId: id,
     needsCredential: !!(password || passphrase)
   };
+  // 协议参数 / 保持活动 / 日志设置随会话一起保存与导出
+  Object.assign(s, readSessionOptions());
   if (password || passphrase) {
     const r = await api.saveCredential(id, password, passphrase);
     if (!r.ok) { alert('凭据加密保存失败：' + (r.error || '未知错误')); return; }
@@ -1591,6 +1742,7 @@ const menuActions = {
   'import-xshell-local': importXshellLocalFiles,
   'open-exports': () => api.openOutputDir('exports').catch(() => {}),
   'open-downloads': () => api.openOutputDir('downloads').catch(() => {}),
+  'open-logs': () => api.openOutputDir('logs').catch(() => {}),
   'connect-selected': () => { const s = selectedSession(); if (s) connectSession(s); else alert('请先在左侧选择一个会话。'); },
   'edit-selected': () => { const s = selectedSession(); if (s) openSessionModal(s.id); else alert('请先在左侧选择一个会话。'); },
   'delete-selected': async () => {
@@ -1618,9 +1770,9 @@ const menuActions = {
   'font-larger': () => { const p = getPrefs(); p.fontSize = Math.min(24, (p.fontSize || 14) + 1); saveJSON(PREFS_KEY, p); applyPrefs(); },
   'font-smaller': () => { const p = getPrefs(); p.fontSize = Math.max(10, (p.fontSize || 14) - 1); saveJSON(PREFS_KEY, p); applyPrefs(); },
   'about': async () => {
-    let ver = '2.1';
+    let ver = '2.2';
     try { ver = await api.appVersion(); } catch (_) {}
-    const mode = outputPaths.portable ? '便携模式（数据随程序目录）' : '标准模式';
+    const mode = outputPaths.portable ? '免安装模式（数据随程序目录）' : '标准模式';
     alert(`openshell ${ver}\n开源 · 多协议 · 无注册 · 无有效期\n\n运行模式：${mode}\n默认输出目录：\n${outputPaths.root}\n\n许可证：MIT`);
   }
 };
@@ -1649,7 +1801,8 @@ $('btn-settings-save').onclick = () => {
     theme: $('s-theme').value,
     fontSize: Math.min(24, Math.max(10, Number($('s-fontsize').value) || 14)),
     scrollback: Math.min(50000, Math.max(1000, Number($('s-scrollback').value) || 5000)),
-    copyOnSelect: $('s-copyonselect') ? $('s-copyonselect').checked : false
+    copyOnSelect: $('s-copyonselect') ? $('s-copyonselect').checked : false,
+    loggingDefault: $('s-logdefault') ? $('s-logdefault').checked : false
   });
   applyPrefs();
   $('settings-modal').classList.add('hidden');
@@ -1933,12 +2086,14 @@ if (!api || !Fmt || !Terminal || !FitAddon) {
         outputPaths = d;
         if ($('be-dir') && !$('be-dir').value) $('be-dir').value = d.exports;
         const sr = $('status-right');
-        if (sr) sr.textContent = 'openshell 2.1 · MIT · ' + (d.portable ? '便携模式 · 数据目录 ' + d.root : '输出目录 ' + d.root);
+        if (sr) sr.textContent = 'openshell 2.2 · MIT · ' + (d.portable ? '免安装模式 · 数据目录 ' + d.root : '输出目录 ' + d.root);
       }
     }).catch(() => {});
   }
   renderSessions();
   applyPrefs();
+  // 会话参数编辑：常规 / 串口 / RLOGIN / RDP / 保持活动 / 日志标签切换
+  initSessionTabs();
   // 所有模态框（新建会话、设置、密码框等）支持按住标题栏拖动
   initModalDragging();
   // Linux 命令查询：非模态浮动面板的拖动 / 缩放 / 收起 / 位置记忆
