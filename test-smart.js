@@ -177,7 +177,7 @@ ok('批量导出：每设备 .cfg + 合并配置包', () => {
   assert.strictEqual(pkg.count, 2);
   assert.strictEqual(pkg.files.length, 2);
   assert(pkg.files[0].name.startsWith('01_') && pkg.files[0].name.endsWith('.cfg'));
-  assert(pkg.files.every(f => f.content.includes('OpenShell 网络版 · 设备配置脚本')));
+  assert(pkg.files.every(f => f.content.includes('openshell · 设备配置脚本')));
   assert(pkg.files.every(f => f.content.includes('拓扑体检评分: 87/100')));
   assert(pkg.packageText.includes('批量配置包') && pkg.packageText.includes('设备文件数: 2'));
   assert.strictEqual(pkg.packageName, 'openshell-配置包.txt');

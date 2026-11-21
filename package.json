@@ -1,7 +1,7 @@
 {
-  "name": "openshell-network",
-  "version": "2.0.0",
-  "description": "OpenShell 网络版 - 开源多协议终端客户端（SSH/Telnet/Rlogin/Serial/Local/SFTP/FTP/RDP/Raw TCP），内置 Linux 命令查询与华为/思科交换机配置自动生成。无注册，无有效期。",
+  "name": "openshell",
+  "version": "2.1.0",
+  "description": "openshell - 开源多协议终端客户端（SSH/Telnet/Rlogin/Serial/Local/SFTP/FTP/RDP/Raw TCP），内置 Linux 命令查询与华为/思科交换机配置自动生成。无注册，无有效期。",
   "main": "src/main.js",
   "author": "OpenShell contributors",
   "license": "MIT",
@@ -15,8 +15,8 @@
     "dist:installer": "electron-builder --win --x64 --publish never"
   },
   "build": {
-    "appId": "com.openshell.network",
-    "productName": "OpenShell网络版",
+    "appId": "com.openshell.app",
+    "productName": "openshell",
     "npmRebuild": false,
     "electronDist": "node_modules/electron/dist",
     "files": [

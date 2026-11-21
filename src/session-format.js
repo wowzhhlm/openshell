@@ -333,14 +333,28 @@
     let sessions = null;
     let vault = '';
     let warning = '';
+    let xtsEncrypted = false;
     if (format === 'xts') {
-      // .xts 是 Xshell 专有的加密打包格式（可含主密码保护的密码），无法离线解析
-      warning = '「' + (fileName || 'Xshell 导出文件') + '」是 Xshell 专有的加密归档格式（.xts），'
-        + '内容为二进制加密数据，OpenShell 无法直接读取。\n'
-        + '请在 Xshell 中改用以下任一方式重新导出后再导入：\n'
-        + '  1) 文件 → 导入/导出 → 选择「导出为 CSV」（OpenShell 支持 CSV/TSV）；\n'
-        + '  2) 会话管理器中逐个「另存为」生成 .xsh 文件；\n'
-        + '  3) 直接复制 Xshell 会话目录（文档\\NetSarang Computer\\Xshell\\Sessions）里的 .xsh 文件。';
+      // .xts 是 Xshell 用「主密码」加密的会话归档（官方说明：记事本打开为乱码，无法识别），
+      // 离线无法解密。但仍先尽力识别：少数情况下导出内容可能是明文 INI/XML/JSON/表格。
+      const head = text.slice(0, 4096);
+      const binary = /[\x00-\x08\x0E-\x1F]/.test(head);
+      let recovered = null;
+      if (!binary && text.trim()) {
+        const sniff = guessFormat(text, fileName.replace(/\.xts$/i, '.txt'));
+        if (sniff === 'openshell') recovered = parseOpenSsh(text);
+        else if (sniff === 'openshell-vault') { const p = parseOpenSshVault(text); recovered = p.sessions; vault = p.vault; }
+        else if (sniff === 'xshell-ini') recovered = parseXshellIni(text, fileName, file.group);
+        else if (sniff === 'xshell-xml') recovered = parseXshellXml(text, fileName, file.group);
+        else if (sniff === 'securecrt') recovered = parseSecureCrt(text, fileName, file.group);
+        else if (sniff === 'csv' || sniff === 'tsv') recovered = parseTable(text, fileName, file.group);
+      }
+      if (recovered && recovered.length) sessions = recovered;
+      else {
+        xtsEncrypted = true;
+        warning = '「' + (fileName || 'Xshell 会话备份') + '」是 Xshell 用主密码加密的 .xts 备份，无法离线解密；'
+          + 'OpenShell 会改从本机 Xshell 会话目录里的 .xsh 文件导入同样的会话。';
+      }
     }
     else if (format === 'openshell') sessions = parseOpenSsh(text);
     else if (format === 'openshell-vault') {
@@ -358,7 +372,7 @@
           + '或改用「主密码加密」的 OpenShell JSON 导出。';
       }
     }
-    return { format, sessions: sessions || [], vault, warning };
+    return { format, sessions: sessions || [], vault, warning, xtsEncrypted };
   }
 
   function safeName(name) {

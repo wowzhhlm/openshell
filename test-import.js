@@ -40,13 +40,22 @@ r = Fmt.parseFile({ name: 'bom.csv', text: '\uFEFFName,Host,Port,User\nX,8.8.8.8
 assert.strictEqual(r.sessions.length, 1, 'BOM 不影响解析');
 console.log('PASS: UTF-8 BOM 处理');
 
-// 5. .xts 专有加密格式 → 明确警告而非假装解析
+// 5. .xts 专有加密格式 → 明确警告 + xtsEncrypted 标记（供渲染层自动兜底）
 r = Fmt.parseFile({ name: 'session.xts', text: '\x00\x01BINARYENCRYPTED' });
 assert.strictEqual(r.format, 'xts');
 assert.strictEqual(r.sessions.length, 0);
-assert(r.warning && r.warning.includes('加密归档'), 'xts 应返回加密格式说明');
-assert(r.warning && r.warning.includes('CSV'), 'xts 提示应给出 CSV 替代方案');
-console.log('PASS: .xts 加密格式明确提示 + 替代方案');
+assert.strictEqual(r.xtsEncrypted, true, 'xts 加密归档应置 xtsEncrypted 标记');
+assert(r.warning && r.warning.includes('加密') && r.warning.includes('无法离线解密'), 'xts 应返回加密格式说明');
+assert(r.warning && r.warning.includes('.xsh'), 'xts 提示应给出本机 .xsh 兜底方案');
+console.log('PASS: .xts 加密格式明确提示 + 本机 .xsh 兜底标记');
+
+// 5b. 少数明文 .xts（导出内容其实是可读表格/INI）仍应尽力解析，不误判为加密
+r = Fmt.parseFile({ name: 'plain.xts', text: 'Name,Host,Port,User\nWeb,10.0.0.1,22,root\n' });
+assert.strictEqual(r.format, 'xts');
+assert.strictEqual(r.xtsEncrypted, false, '明文 .xts 不应误判为加密');
+assert.strictEqual(r.sessions.length, 1);
+assert.strictEqual(r.sessions[0].host, '10.0.0.1');
+console.log('PASS: 明文 .xts 内容嗅探解析');
 
 // 6. 分号分隔 + 分组目录名
 r = Fmt.parseFile({ name: 'a.csv', text: 'Name;Host;Port;User\nS1;192.168.5.5;22;admin\n', group: '分支' });

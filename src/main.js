@@ -27,11 +27,11 @@ const tabs = new Map();
    便携模式：exe 同级存在 portable.txt 时，所有数据与配置写入程序所在目录，
    因此整套目录复制到 U 盘后换电脑仍可正常使用（不依赖 D 盘）。
    普通模式：保持原有约定，统一写入 D:\openshell。                       */
-let APP_DIR = 'D:\\openshell-network';
+let APP_DIR = 'D:\\openshell';
 let PORTABLE_MODE = false;
 try { APP_DIR = path.dirname(process.execPath); } catch {}
 try { PORTABLE_MODE = fs.existsSync(path.join(APP_DIR, 'portable.txt')); } catch {}
-const OUTPUT_ROOT = PORTABLE_MODE ? path.join(APP_DIR, 'OpenShell网络版数据') : 'D:\\openshell-network';
+const OUTPUT_ROOT = PORTABLE_MODE ? path.join(APP_DIR, 'openshell数据') : 'D:\\openshell';
 if (PORTABLE_MODE) {
   try { app.setPath('userData', path.join(OUTPUT_ROOT, '配置')); } catch {}
 }
@@ -109,7 +109,7 @@ function createWindow() {
     height: 900,
     minWidth: 960,
     minHeight: 640,
-    title: 'OpenShell 网络版 - 多协议终端与网络拓扑配置工具',
+    title: 'openshell 2.1 - 多协议终端与网络拓扑配置工具',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -141,7 +141,7 @@ function decodeTextBuffer(buf) {
 }
 
 /* ---------------- 窗口与对话框 ---------------- */
-ipcMain.handle('app:version', () => app.getVersion());
+ipcMain.handle('app:version', () => '2.1');
 ipcMain.handle('app:outputDirs', () => ({
   root: OUTPUT_ROOT, exports: EXPORT_DIR, downloads: DOWNLOAD_DIR, reports: REPORT_DIR,
   portable: PORTABLE_MODE, appDir: APP_DIR
@@ -334,6 +334,70 @@ ipcMain.handle('cred:remove', async (_event, id) => {
   return { ok: true };
 });
 
+/* 首次连接前判断是否已保存凭据：没有则先弹密码输入框 */
+ipcMain.handle('cred:has', (_event, id, field) => {
+  const entry = loadCreds()[String(id || '')];
+  return { ok: true, has: !!(entry && entry[String(field || 'password')]) };
+});
+
+/* ---------------- 从本机 Xshell 会话目录导入 ----------------
+   .xts 是 Xshell 用「主密码」加密的归档，离线无法解密；但同一批会话的原始
+   .xsh 文件就在 文档\NetSarang Computer\<版本>\Xshell\Sessions 下且为明文 INI。
+   遇到 .xts 时自动改从这里导入，用户无需再手动重新导出。                  */
+function findXshellSessionDirs(root) {
+  const dirs = [];
+  function walk(dir, depth) {
+    if (depth > 6 || dirs.length > 30) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      const full = path.join(dir, e.name);
+      if (/^sessions$/i.test(e.name) && /xshell/i.test(full)) { dirs.push(full); continue; }
+      if (/xshell|netsarang|sessions/i.test(full) || depth < 2) walk(full, depth + 1);
+    }
+  }
+  walk(root, 0);
+  return [...new Set(dirs)];
+}
+function collectXshFiles(dir, out) {
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) { if (out.length < MAX_BATCH_FILES) collectXshFiles(full, out); continue; }
+    if (!e.isFile() || !/\.xsh$/i.test(e.name)) continue;
+    try {
+      if (fs.statSync(full).size > MAX_FILE_BYTES) continue;
+      out.push({ name: e.name, text: decodeTextBuffer(fs.readFileSync(full)), group: 'Xshell' });
+    } catch {}
+  }
+}
+function xshellLocalRoots() {
+  const home = process.env.USERPROFILE || app.getPath('home');
+  return [
+    path.join(home, 'Documents', 'NetSarang Computer'),
+    path.join(home, '文档', 'NetSarang Computer'),
+    path.join(home, 'Documents', 'NetSarang'),
+    path.join(home, 'AppData', 'Roaming', 'NetSarang')
+  ].filter((p) => { try { return fs.existsSync(p); } catch { return false; } });
+}
+ipcMain.handle('xshell:importLocal', async () => {
+  const dirs = [];
+  xshellLocalRoots().forEach((r) => dirs.push(...findXshellSessionDirs(r)));
+  const uniqDirs = [...new Set(dirs)];
+  const files = [];
+  uniqDirs.forEach((d) => collectXshFiles(d, files));
+  return { ok: true, dirs: uniqDirs, files: files.slice(0, MAX_BATCH_FILES) };
+});
+ipcMain.handle('xshell:importFromDir', async (_event, dir) => {
+  const root = String(dir || '');
+  if (!root || !fs.existsSync(root)) return { ok: false, error: '目录不存在', files: [], dirs: [] };
+  const files = [];
+  collectXshFiles(root, files);
+  return { ok: true, dirs: [root], files: files.slice(0, MAX_BATCH_FILES) };
+});
+
 /* 批量导出凭据明文（供主密码保险库加密；仅在渲染层主动请求时返回） */
 ipcMain.handle('cred:exportAll', () => {
   const creds = loadCreds();
@@ -370,6 +434,17 @@ function decryptCredential(id, field) {
     if (!value) return '';
     return safeStorage.decryptString(Buffer.from(value, 'base64'));
   } catch { return ''; }
+}
+
+/* 用户首次连接时输入的临时凭据：仅在内存中随 IPC 传递一次，绝不写盘 */
+function inlineCredential(session, field) {
+  return String((session && session[field]) || '');
+}
+function stripInlineCreds(session) {
+  const c = { ...(session || {}) };
+  delete c.password;
+  delete c.passphrase;
+  return c;
 }
 
 /* ---------------- 主机密钥校验 ---------------- */
@@ -462,7 +537,7 @@ function telnetParser(onData, replyOption) {
 ipcMain.handle('telnet:connect', async (_event, tabId, session) => {
   if (!tabId || !session || !session.host) throw new Error('连接参数不完整');
   if (tabs.has(tabId)) closeTabResources(tabs.get(tabId));
-  const tab = { id: tabId, conn: null, stream: null, sftp: null, forwardServers: [], session };
+  const tab = { id: tabId, conn: null, stream: null, sftp: null, forwardServers: [], session: stripInlineCreds(session) };
   tabs.set(tabId, tab);
 
   const isRaw = session.protocol === 'raw';
@@ -471,7 +546,7 @@ ipcMain.handle('telnet:connect', async (_event, tabId, session) => {
   const port = Number(session.port) || (isRlogin ? 513 : 23);
   const credentialId = session.credentialId || session.id;
   const user = String(session.user || '');
-  const password = decryptCredential(credentialId, 'password');
+  const password = inlineCredential(session, 'password') || decryptCredential(credentialId, 'password');
   let loginSent = false;
   let passSent = false;
   let tail = '';
@@ -536,7 +611,7 @@ ipcMain.handle('telnet:connect', async (_event, tabId, session) => {
 ipcMain.handle('ssh:connect', async (_event, tabId, session) => {
   if (!tabId || !session || !session.host) throw new Error('连接参数不完整');
   if (tabs.has(tabId)) closeTabResources(tabs.get(tabId));
-  const tab = { id: tabId, conn: null, stream: null, sftp: null, forwardServers: [], session };
+  const tab = { id: tabId, conn: null, stream: null, sftp: null, forwardServers: [], session: stripInlineCreds(session) };
   tabs.set(tabId, tab);
 
   const cfg = {
@@ -575,7 +650,7 @@ ipcMain.handle('ssh:connect', async (_event, tabId, session) => {
       const keyPath = String(session.keyfile || '');
       if (!keyPath) throw new Error('未指定私钥文件');
       cfg.privateKey = await fsp.readFile(keyPath);
-      const passphrase = decryptCredential(credentialId, 'passphrase');
+      const passphrase = inlineCredential(session, 'passphrase') || decryptCredential(credentialId, 'passphrase');
       if (passphrase) cfg.passphrase = passphrase;
     } catch (e) {
       send('ssh:error', tabId, '读取私钥失败: ' + e.message);
@@ -583,7 +658,7 @@ ipcMain.handle('ssh:connect', async (_event, tabId, session) => {
       return { ok: false, error: e.message };
     }
   } else {
-    cfg.password = decryptCredential(credentialId, 'password');
+    cfg.password = inlineCredential(session, 'password') || decryptCredential(credentialId, 'password');
   }
 
   const conn = new Client();
@@ -786,7 +861,7 @@ function openTopologyWindow() {
   topologyWindow = new BrowserWindow({
     width: 1500,
     height: 960,
-    title: 'OpenShell 网络版 · 网络拓扑配置工具',
+    title: 'openshell · 网络拓扑配置工具',
     webPreferences: {
       preload: path.join(__dirname, 'topology', 'preload.js'),
       nodeIntegration: false,
@@ -804,7 +879,7 @@ ipcMain.handle('topology:open', () => { openTopologyWindow(); return { ok: true 
 
 /* ---------------- 拓扑配置包导出（智能面板） ----------------
    渲染层只允许提交 [{name, content}]，文件名/内容/数量全部在主进程复核，
-   防止路径穿越与超大文件；结果统一写入 D:\openshell-network\导出。
+   防止路径穿越与超大文件；结果统一写入 D:\openshell\导出。
    ------------------------------------------------------------ */
 ipcMain.handle('topology:saveConfigPackage', async (_event, payload) => {
   const p = payload && typeof payload === 'object' ? payload : {};
@@ -839,7 +914,7 @@ ipcMain.handle('topology:saveConfigPackage', async (_event, payload) => {
     written.push(pkgName);
   }
   const manifest = [
-    'OpenShell 网络版 · 配置包清单',
+    'openshell · 配置包清单',
     '生成时间: ' + String(p.generatedAt || new Date().toLocaleString('zh-CN')),
     '文件数: ' + written.length,
     '',
@@ -888,7 +963,8 @@ ipcMain.handle('ftp:connect', async (_event, tabId, session) => {
   const client = FTP.createFtpClient();
   try {
     await client.connect(String(session.host), Number(session.port) || 21);
-    await client.auth(String(session.user || 'anonymous'), decryptCredential(session.credentialId || session.id, 'password') || 'anonymous@');
+    await client.auth(String(session.user || 'anonymous'),
+      inlineCredential(session, 'password') || decryptCredential(session.credentialId || session.id, 'password') || 'anonymous@');
     const tab = { id: tabId, ftp: client, session, forwardServers: [] };
     tabs.set(tabId, tab);
     send('ssh:progress', tabId, `FTP 已连接 ${session.host}`);
@@ -937,9 +1013,9 @@ ipcMain.handle('net:deployConfig', async (_event, session, commands) => {
     host: String(session.host || ''),
     port: Number(session.port) || 22,
     username: String(session.user || ''),
-    password: decryptCredential(session.credentialId || session.id, 'password'),
+    password: inlineCredential(session, 'password') || decryptCredential(session.credentialId || session.id, 'password'),
     privateKey: session.keyfile ? (() => { try { return fs.readFileSync(session.keyfile); } catch { return undefined; } })() : undefined,
-    passphrase: decryptCredential(session.credentialId || session.id, 'passphrase') || undefined,
+    passphrase: inlineCredential(session, 'passphrase') || decryptCredential(session.credentialId || session.id, 'passphrase') || undefined,
     readyTimeout: 20000
   };
   if (!cfg.host) return { ok: false, error: '目标交换机主机不能为空' };

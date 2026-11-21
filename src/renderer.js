@@ -345,6 +345,102 @@ api.on('sftp:progress', (tabId, name, transferred) => {
   status(`传输中 ${name}：${formatBytes(transferred)}`);
 });
 
+/* ---------------- 首次连接凭据 ----------------
+   导入的会话不含密码：连接前先弹输入框，再询问「是否保存」，最后才开始握手。
+   临时凭据只放在内存副本中随 IPC 传递一次，不写入 localStorage / tab.session。 */
+function stripInlineCreds(s) {
+  const c = { ...(s || {}) };
+  delete c.password;
+  delete c.passphrase;
+  return c;
+}
+
+/* 弹「输入连接密码 / 私钥口令」框，返回字符串；取消返回 null */
+function askConnectCredential(session, field) {
+  return new Promise((resolve) => {
+    const modal = $('connect-cred-modal');
+    const input = $('cc-password');
+    const toggle = $('cc-toggle');
+    if (!modal || !input) { resolve(''); return; }
+    const isKey = field === 'passphrase';
+    const label = isKey ? '私钥口令' : '密码';
+    $('cc-title').textContent = '输入连接' + label;
+    $('cc-label-text').textContent = label;
+    $('cc-desc').textContent = `会话「${session.name || session.host || ''}」尚未保存${label}，请输入后继续连接。`;
+    input.value = '';
+    input.placeholder = `请输入${label}` + (isKey ? '（可留空）' : '');
+    input.type = 'password';
+    toggle.textContent = '👁';
+    modal.classList.remove('hidden');
+    setTimeout(() => { try { input.focus(); } catch {} }, 30);
+
+    let done = false;
+    const finish = (val) => {
+      if (done) return;
+      done = true;
+      modal.classList.add('hidden');
+      $('cc-ok').onclick = null;
+      $('cc-cancel').onclick = null;
+      const cb = modal.querySelector('.modal-close');
+      if (cb) cb.onclick = null;
+      input.onkeydown = null;
+      toggle.onclick = null;
+      resolve(val);
+    };
+    $('cc-ok').onclick = () => finish(input.value);
+    $('cc-cancel').onclick = () => finish(null);
+    const closeBtn = modal.querySelector('.modal-close');
+    if (closeBtn) closeBtn.onclick = () => finish(null);
+    input.onkeydown = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); finish(input.value); }
+      else if (e.key === 'Escape') { e.preventDefault(); finish(null); }
+    };
+    toggle.onclick = (e) => {
+      e.preventDefault();
+      const visible = input.type === 'text';
+      input.type = visible ? 'password' : 'text';
+      toggle.textContent = visible ? '👁' : '🙈';
+      input.focus();
+    };
+  });
+}
+
+/* 连接前确保凭据可用：已保存 → 直接返回；未保存 → 先输入、再问是否保存。
+   返回带临时凭据的会话副本；用户取消返回 null。 */
+async function ensureCredentialBeforeConnect(session, protocol) {
+  if (!session) return session;
+  // 本地终端 / 串口 / RDP 不走密码认证
+  if (['local', 'serial', 'rdp'].includes(protocol)) return session;
+  const id = session.credentialId || session.id;
+  const field = session.auth === 'privatekey' ? 'passphrase' : 'password';
+  let has = false;
+  try {
+    const r = await api.credHas(id, field);
+    has = !!(r && r.has);
+  } catch (_) {}
+  if (has) return session;                 // 已加密保存，直接连接
+  const value = await askConnectCredential(session, field);
+  if (value === null) return null;         // 用户取消连接
+  const copy = { ...session, [field]: value };
+  if (value) {
+    const word = field === 'passphrase' ? '私钥口令' : '密码';
+    const wantSave = confirm(
+      `是否保存「${session.name || session.host}」的${word}？\n\n` +
+      '保存后由系统加密存储（Windows DPAPI），不会写入会话文件；下次连接无需再输入。\n' +
+      '点击「确定」保存，点击「取消」则本次连接临时使用、不保存。'
+    );
+    if (wantSave) {
+      const password = field === 'password' ? value : '';
+      const passphrase = field === 'passphrase' ? value : '';
+      try {
+        const r = await api.saveCredential(id, password, passphrase);
+        if (!r || !r.ok) alert('密码保存失败，本次连接仍可继续：' + ((r && r.error) || '未知错误'));
+      } catch (e) { alert('密码保存失败，本次连接仍可继续：' + (e.message || e)); }
+    }
+  }
+  return copy;
+}
+
 /* ---------------- SSH 连接 ---------------- */
 /* 查找可复用的标签：同一会话、且处于失败/断开状态（避免重复开新标签） */
 function findReusableTab(session) {
@@ -361,7 +457,8 @@ function findReusableTab(session) {
    BUG 修复：重连时不再清屏，保留上一次的错误信息，追加分隔线后继续连接，方便排查。 */
 async function connectIntoTab(tab, session, protocol) {
   const term = tab.term;
-  tab.session = session;
+  // 临时内联凭据只用于本次 IPC；绝不留在 tab.session 中，避免随标签常驻内存
+  tab.session = stripInlineCreds(session);
   tab.sessionKey = session.id || `${protocol}|${session.host}|${session.port}|${session.user}`;
   tab.connState = 'connecting';
   tab.attempts = (tab.attempts || 0) + 1;
@@ -373,7 +470,7 @@ async function connectIntoTab(tab, session, protocol) {
     term.writeln(`${cyan}◆ 第 ${tab.attempts} 次连接尝试${reset} ${dim}${new Date().toLocaleTimeString()}${reset}`);
     term.writeln('\x1b[90m────────────────────────────────────────\x1b[0m');
   } else {
-    let ver = '2.0.0';
+    let ver = '2.1';
     try { ver = await api.appVersion(); } catch (_) {}
     term.writeln(`${cyan}OpenShell ${ver}${reset} · ${protocol.toUpperCase()}`);
     term.writeln('Copyright (c) 2026 OpenShell contributors. All rights reserved.');
@@ -417,15 +514,23 @@ async function connectIntoTab(tab, session, protocol) {
 /* 在原标签重新连接（保留历史错误信息） */
 async function reconnectTab(tab, session) {
   if (!tab || !tabs.has(tab.id)) return;
-  const protocol = Fmt.normalizeProtocol((session || tab.session || {}).protocol);
+  const base = session || tab.session || {};
+  const protocol = Fmt.normalizeProtocol(base.protocol);
+  // 重连同样遵守「先输入密码 → 再问是否保存」，已保存的凭据则直接跳过
+  const prepared = await ensureCredentialBeforeConnect(base, protocol);
+  if (prepared === null) { status('已取消重新连接'); return; }
   // 停止旧数据监听，断开旧连接；但不清屏，保留之前的错误信息
   if (tab.onDataDisposable) { try { tab.onDataDisposable.dispose(); } catch {} tab.onDataDisposable = null; }
   try { api.sshDisconnect(tab.id); } catch {}
-  await connectIntoTab(tab, session || tab.session, protocol);
+  await connectIntoTab(tab, prepared, protocol);
 }
 
 async function connectSession(session) {
   const protocol = Fmt.normalizeProtocol(session.protocol);
+  // 首次连接先输入密码/口令并询问是否保存；取消则不发起连接
+  const prepared = await ensureCredentialBeforeConnect(session, protocol);
+  if (prepared === null) { status('已取消连接'); return; }
+  session = prepared;
   // RDP 是图形协议，无法在终端渲染，调用系统远程桌面客户端
   if (protocol === 'rdp') {
     try {
@@ -441,10 +546,10 @@ async function connectSession(session) {
   if (protocol === 'local') {
     const tab = createTab('本地终端', 'local');
     tab.protocol = 'local';
-    tab.session = session;
+    tab.session = stripInlineCreds(session);
     tab.connState = 'idle';
     const term = tab.term;
-    term.writeln('\x1b[36mOpenShell 网络版 · 本地终端\x1b[0m');
+    term.writeln('\x1b[36mopenshell · 本地终端\x1b[0m');
     term.writeln('\x1b[2m输入 exit 退出；本地终端直接在你的电脑上执行命令。\x1b[0m\r\n');
     status('正在启动本地终端…');
     tab.onDataDisposable = term.onData((data) => api.localWrite(tab.id, data));
@@ -456,11 +561,11 @@ async function connectSession(session) {
   if (protocol === 'ftp') {
     const tab = createTab(session.name || `${session.user}@${session.host}`, 'ftp');
     tab.protocol = 'ftp';
-    tab.session = session;
+    tab.session = stripInlineCreds(session);
     tab.sessionKey = session.id || `ftp|${session.host}|${session.port}|${session.user}`;
     tab.connState = 'connecting';
     const term = tab.term;
-    term.writeln('\x1b[36mOpenShell 网络版 · FTP\x1b[0m');
+    term.writeln('\x1b[36mopenshell · FTP\x1b[0m');
     term.writeln('\x1b[2mFTP 为文件传输协议，双击会话后可在文件面板列出远程目录。\x1b[0m\r\n');
     status(`正在连接 FTP ${session.host}`);
     try {
@@ -735,6 +840,7 @@ async function doBatchImport() {
     try {
       const result = Fmt.parseFile(f);
       if (result.warning) warnings.push(result.warning);
+      if (result.xtsEncrypted) warnings.push('检测到 .xts 加密归档，请使用「文件 → 从本机 Xshell 会话导入…」自动导入本机 .xsh 会话。');
       const sessions = normalizeImported(result.sessions || []).map((s, i) => {
         const src = (result.sessions || [])[i] || {};
         s.credentialId = src.credentialId || src.id || s.id;
@@ -846,40 +952,134 @@ function normalizeImported(list) {
     needsCredential: true
   }));
 }
-async function importSessions() {
-  const files = await api.selectImportFiles();
-  if (!files.length) return;
+/* 把一批文件解析成会话；不写盘。xtsEncrypted 表示命中 Xshell 加密归档 */
+function parseImportFiles(files) {
   const all = [];
   const stats = {};
   const warnings = [];
   let vaultPayload = '';
-  for (const f of files) {
+  let xtsEncrypted = false;
+  for (const f of files || []) {
     if (f.error || !Fmt) { stats.unknown = (stats.unknown || 0) + 1; continue; }
     try {
       const result = Fmt.parseFile(f);
       const sessions = normalizeImported(result.sessions || []);
       // 还原会话 id，使导入的密码能对应到凭据
-      (result.sessions || []).forEach((src, i) => { if (sessions[i]) sessions[i].credentialId = src.credentialId || src.id || sessions[i].id; });
+      (result.sessions || []).forEach((src, i) => {
+        if (sessions[i]) sessions[i].credentialId = src.credentialId || src.id || sessions[i].id;
+      });
       all.push(...sessions);
       stats[result.format] = (stats[result.format] || 0) + sessions.length;
       if (result.vault) vaultPayload = result.vault;
       if (result.warning) warnings.push(result.warning);
+      if (result.xtsEncrypted) xtsEncrypted = true;
     } catch { stats.unknown = (stats.unknown || 0) + 1; }
   }
-  if (!all.length) {
-    const base = '未从所选文件中解析出有效会话。\n\n支持：OpenShell JSON（含加密密码保险库）、Xshell .xsh / .csv / .tsv、SecureCRT .ini。';
-    alert(warnings.length ? base + '\n\n' + warnings.join('\n\n') : base);
-    return;
+  return { all, stats, warnings, vaultPayload, xtsEncrypted };
+}
+
+function mergeParsed(target, extra) {
+  target.all.push(...extra.all);
+  Object.entries(extra.stats).forEach(([k, v]) => { target.stats[k] = (target.stats[k] || 0) + v; });
+  target.warnings.push(...extra.warnings);
+  if (extra.vaultPayload) target.vaultPayload = extra.vaultPayload;
+}
+
+/* 实际写盘 + 密码还原 + 结果提示 */
+async function commitImported(parsed, opts) {
+  const o = opts || {};
+  if (!parsed.all.length) {
+    const base = '未从所选文件中解析出有效会话。\n\n'
+      + '支持：OpenShell JSON（含加密密码保险库）、Xshell .xsh / .csv / .tsv、SecureCRT .ini。\n'
+      + 'Xshell 的 .xts 为加密备份，无法离线解密；请改用「文件 → 从本机 Xshell 会话导入…」，\n'
+      + '或在 Xshell 中另存为 .xsh / 导出 CSV。';
+    alert(parsed.warnings.length ? base + '\n\n' + parsed.warnings.join('\n\n') : base);
+    return false;
   }
-  saveSessions([...getSessions(), ...all]);
-  const summary = Object.entries(stats).map(([k, v]) => `${k}: ${v}`).join('\n');
-  let pwMsg = '\n\n密码未导入，请在会话编辑中重新填入。';
-  if (vaultPayload) {
-    const vr = await decryptVaultOnImport(vaultPayload);
+  saveSessions([...getSessions(), ...parsed.all]);
+  const summary = Object.entries(parsed.stats).map(([k, v]) => `${k}: ${v}`).join('\n');
+  let pwMsg = '\n\n密码未导入，首次连接时会提示输入。';
+  if (parsed.vaultPayload) {
+    const vr = await decryptVaultOnImport(parsed.vaultPayload);
     pwMsg = '\n\n密码还原：' + vr.message;
   }
-  alert(`已导入 ${all.length} 个会话：\n${summary}${pwMsg}` +
-    (warnings.length ? '\n\n提示：\n' + warnings.join('\n') : ''));
+  const head = o.sourceLabel ? `导入来源：${o.sourceLabel}\n` : '';
+  alert(`${head}已导入 ${parsed.all.length} 个会话：\n${summary}${pwMsg}` +
+    (parsed.warnings.length ? '\n\n提示：\n' + parsed.warnings.slice(0, 4).join('\n') : ''));
+  status(`导入完成：${parsed.all.length} 个会话`);
+  return true;
+}
+
+/* .xts 引导弹窗 */
+function openXtsGuide(text) {
+  $('xts-guide-text').textContent = text || '';
+  $('xts-guide-modal').classList.remove('hidden');
+}
+if ($('xts-guide-close')) $('xts-guide-close').onclick = () => $('xts-guide-modal').classList.add('hidden');
+if ($('xts-guide-dir')) $('xts-guide-dir').onclick = async () => {
+  const picked = await api.selectImportDir();
+  $('xts-guide-modal').classList.add('hidden');
+  if (!picked || !picked.files || !picked.files.length) {
+    alert('所选目录中没有找到可导入的会话文件（.xsh / .csv / .tsv / .ini / .json）。');
+    return;
+  }
+  const parsed = parseImportFiles(picked.files);
+  await commitImported(parsed, { sourceLabel: picked.dir || '所选目录' });
+};
+
+/* .xts 加密归档：自动改从本机 Xshell 会话目录导入同批 .xsh */
+async function importFromLocalXshell(parsed) {
+  let local;
+  try { local = await api.importXshellLocal(); }
+  catch (e) { local = { ok: false, error: e.message || String(e) }; }
+  if (local && local.ok && local.files && local.files.length) {
+    const extra = parseImportFiles(local.files);
+    const before = parsed.all.length;
+    mergeParsed(parsed, extra);
+    const dirs = (local.dirs || []).join('、') || '本机 Xshell 会话目录';
+    parsed.warnings.unshift(
+      `已在「${dirs}」找到 ${local.files.length} 个 .xsh 会话文件，自动补入 ${parsed.all.length - before} 个会话。`
+    );
+    return true;
+  }
+  const why = (local && local.error) ? local.error : '未在本机找到 Xshell 会话文件（.xsh）';
+  openXtsGuide(
+    '所选 .xts 是 Xshell 用主密码加密的会话归档，OpenShell 无法离线解密。\n\n'
+    + '替代方式（任选其一）：\n'
+    + '① 在 Xshell 中把会话「另存为」.xsh，或导出为 CSV / TSV 后再导入；\n'
+    + '② 点击下面按钮手动选择本机 Xshell 的 Sessions 目录；\n'
+    + '③ 在 Xshell 中取消主密码后重新导出。\n\n'
+    + `当前状态：${why}`
+  );
+  return false;
+}
+
+/* 文件菜单：直接从本机 Xshell 会话目录导入 */
+async function importXshellLocalFiles() {
+  let r;
+  try { r = await api.importXshellLocal(); }
+  catch (e) { alert('读取本机 Xshell 会话失败：' + (e.message || e)); return; }
+  if (!r.ok) { alert('读取本机 Xshell 会话失败：' + (r.error || '未知错误')); return; }
+  if (!r.files || !r.files.length) {
+    openXtsGuide('未在本机找到 Xshell 会话文件（.xsh）。\n\n'
+      + '常见位置：文档\\NetSarang Computer\\<版本>\\Xshell\\Sessions\\。\n'
+      + '请点击下面按钮手动选择该目录，或在 Xshell 中导出为 CSV / .xsh 后再导入。');
+    return;
+  }
+  const parsed = parseImportFiles(r.files);
+  await commitImported(parsed, { sourceLabel: (r.dirs || []).join('、') || '本机 Xshell 会话目录' });
+}
+
+async function importSessions() {
+  const files = await api.selectImportFiles();
+  if (!files.length) return;
+  const parsed = parseImportFiles(files);
+  // 命中 .xts 加密归档：不再粗暴报错，自动尝试本机 .xsh 兜底
+  if (parsed.xtsEncrypted) {
+    const recovered = await importFromLocalXshell(parsed);
+    if (!recovered && !parsed.all.length) return; // 已展示引导弹窗
+  }
+  await commitImported(parsed);
 }
 /* ---------------- 主密码保险库：导出/导入密码 ----------------
    导出：默认导出密码，先验证主密码，用主密码加密密码字典写入会话文件。
@@ -1189,6 +1389,7 @@ const menuActions = {
   'quick-connect': () => openSessionModal(),
   'batch-import': openBatchImport,
   'batch-export': openBatchExport,
+  'import-xshell-local': importXshellLocalFiles,
   'open-exports': () => api.openOutputDir('exports').catch(() => {}),
   'open-downloads': () => api.openOutputDir('downloads').catch(() => {}),
   'connect-selected': () => { const s = selectedSession(); if (s) connectSession(s); else alert('请先在左侧选择一个会话。'); },
@@ -1218,13 +1419,22 @@ const menuActions = {
   'font-larger': () => { const p = getPrefs(); p.fontSize = Math.min(24, (p.fontSize || 14) + 1); saveJSON(PREFS_KEY, p); applyPrefs(); },
   'font-smaller': () => { const p = getPrefs(); p.fontSize = Math.max(10, (p.fontSize || 14) - 1); saveJSON(PREFS_KEY, p); applyPrefs(); },
   'about': async () => {
-    let ver = '2.0.0';
+    let ver = '2.1';
     try { ver = await api.appVersion(); } catch (_) {}
     const mode = outputPaths.portable ? '便携模式（数据随程序目录）' : '标准模式';
-    alert(`OpenShell 网络版 ${ver}\n开源 · 多协议 · 无注册 · 无有效期\n\n运行模式：${mode}\n默认输出目录：\n${outputPaths.root}\n\n许可证：MIT`);
+    alert(`openshell ${ver}\n开源 · 多协议 · 无注册 · 无有效期\n\n运行模式：${mode}\n默认输出目录：\n${outputPaths.root}\n\n许可证：MIT`);
   }
 };
 document.querySelectorAll('.menu-popup button[data-action]').forEach((btn) => {
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    document.querySelectorAll('.menu').forEach((m) => m.classList.remove('open'));
+    const fn = menuActions[btn.dataset.action];
+    if (fn) Promise.resolve(fn()).catch((err) => alert('操作失败：' + (err.message || String(err))));
+  };
+});
+/* 一级直达菜单（网络拓扑 / Linux 命令查询）：点击立即执行，不需要展开子菜单 */
+document.querySelectorAll('.menu-direct[data-action]').forEach((btn) => {
   btn.onclick = (e) => {
     e.stopPropagation();
     document.querySelectorAll('.menu').forEach((m) => m.classList.remove('open'));
@@ -1498,6 +1708,8 @@ if (!api || !Fmt || !Terminal || !FitAddon) {
       if (d && d.exports) {
         outputPaths = d;
         if ($('be-dir') && !$('be-dir').value) $('be-dir').value = d.exports;
+        const sr = $('status-right');
+        if (sr) sr.textContent = 'openshell 2.1 · MIT · ' + (d.portable ? '便携模式 · 数据目录 ' + d.root : '输出目录 ' + d.root);
       }
     }).catch(() => {});
   }

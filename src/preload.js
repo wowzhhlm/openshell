@@ -12,8 +12,11 @@ const INVOKE_CHANNELS = [
   'export:writeFiles',
   'cred:save',
   'cred:remove',
+  'cred:has',
   'cred:exportAll',
   'cred:importMany',
+  'xshell:importLocal',
+  'xshell:importFromDir',
   'ssh:connect',
   'telnet:connect',
   'local:spawn',
@@ -53,8 +56,7 @@ const ON_CHANNELS = [
   'ssh:status',
   'ssh:progress',
   'ssh:forwardLog',
-  'sftp:progress',
-  'hostkey:warning'
+  'sftp:progress'
 ];
 
 const invoke = (channel, ...args) => {
@@ -84,8 +86,11 @@ contextBridge.exposeInMainWorld('openshell', {
 
   saveCredential: (sessionId, password, passphrase) => invoke('cred:save', sessionId, password, passphrase),
   removeCredential: (sessionId) => invoke('cred:remove', sessionId),
+  credHas: (id, field) => invoke('cred:has', id, field),
   exportAllCredentials: () => invoke('cred:exportAll'),
   importCredentials: (secrets) => invoke('cred:importMany', secrets),
+  importXshellLocal: () => invoke('xshell:importLocal'),
+  importXshellFromDir: (dir) => invoke('xshell:importFromDir', dir),
 
   sshConnect: (tabId, session) => invoke('ssh:connect', tabId, session),
   telnetConnect: (tabId, session) => invoke('telnet:connect', tabId, session),

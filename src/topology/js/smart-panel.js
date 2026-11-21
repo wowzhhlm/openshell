@@ -1,5 +1,5 @@
 /* ============================================================
-   smart-panel.js — 智能配置分析面板（OpenShell 网络版自研 UI 接入层）
+   smart-panel.js — 智能配置分析面板（openshell自研 UI 接入层）
    ------------------------------------------------------------
    · 以「附加」方式接入，不修改第三方 app.js / ui-controller.js 的原有逻辑
    · 依赖：SmartConfig（smart-config.js）、window.__topoTool.graph、CmdTpl
@@ -101,7 +101,7 @@
     ov.style.display = 'none';
     var box = el('div', 'sp-box');
     var head = el('div', 'sp-head');
-    head.appendChild(el('span', '', '🧠 智能配置分析 · OpenShell 网络版'));
+    head.appendChild(el('span', '', '🧠 智能配置分析 · openshell'));
     var close = el('button', '', '✕'); close.id = 'sp-close'; close.title = '关闭';
     head.appendChild(close);
     box.appendChild(head);
@@ -353,7 +353,7 @@
     var a = ensureAnalysis();
     pane.appendChild(el('div', 'sp-note',
       '把批量生成的命令按设备拆成独立 .cfg 配置文件，并附合并配置包与清单。' +
-      '保存到 D 盘时会写入 D:\\openshell-network\\导出\\配置包_<时间>\\。请务必人工复核后再下发。'));
+      '保存到 D 盘时会写入 D:\\openshell\\导出\\配置包_<时间>\\。请务必人工复核后再下发。'));
     var text = generateAllText();
     if (!text) { pane.appendChild(el('div', 'sp-result err', '未能生成命令，请先在画布中添加设备并连线。')); return; }
     var pkg = SC.batchExport(text, { score: a.report.score });
@@ -373,7 +373,7 @@
     });
     pane.appendChild(t);
 
-    var save = el('button', 'sp-btn primary', '💾 保存全部到 D:\\openshell-network\\导出');
+    var save = el('button', 'sp-btn primary', '💾 保存全部到 D:\\openshell\\导出');
     save.onclick = function () { doSave(pkg, pane, save); };
     pane.appendChild(save);
     var dl = el('button', 'sp-btn', '⬇ 下载合并配置包');

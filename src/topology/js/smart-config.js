@@ -1,5 +1,5 @@
 /* ============================================================
-   smart-config.js — OpenShell 网络版 · 自研智能配置引擎
+   smart-config.js — openshell · 自研智能配置引擎
    ------------------------------------------------------------
    · 纯函数、零外部依赖：可在浏览器 <script> 直接引用，也可在 Node 中 require 单测
    · 不复制第三方引擎的实现，仅通过 analyzeTopology() / CmdTpl 的公开输出协作
@@ -627,7 +627,7 @@
   function deviceFileHeader(b, opt) {
     var lines = [];
     lines.push('! ══════════════════════════════════════════');
-    lines.push('! OpenShell 网络版 · 设备配置脚本');
+    lines.push('! openshell · 设备配置脚本');
     lines.push('! 设备: ' + b.name);
     lines.push('! 序号: ' + b.index + '  |  生成时间: ' + (opt && opt.generatedAt || new Date().toLocaleString('zh-CN')));
     if (opt && opt.score != null) lines.push('! 拓扑体检评分: ' + opt.score + '/100');
@@ -640,7 +640,7 @@
   function buildPackage(files, meta) {
     var m = meta || {}, out = [];
     out.push('! ============================================================');
-    out.push('!  OpenShell 网络版 · 批量配置包');
+    out.push('!  openshell · 批量配置包');
     out.push('!  生成时间: ' + (m.generatedAt || new Date().toLocaleString('zh-CN')));
     out.push('!  设备文件数: ' + ((files || []).length));
     if (m.score != null) out.push('!  拓扑体检评分: ' + m.score + '/100');
