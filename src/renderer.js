@@ -41,6 +41,188 @@ function formatBytes(n) {
   return n.toFixed(i ? 1 : 0) + ' ' + units[i];
 }
 
+/* ---------------- 通用弹窗拖动（新建会话 / 设置 / 密码框等所有 modal） ----------------
+   用 transform 偏移，不改动 .modal 的 grid 居中布局；限制在窗口内，双击标题栏复位。 */
+function readTranslate(el) {
+  const m = /translate(?:3d)?\(([^)]+)\)/.exec(el.style.transform || '');
+  if (!m) return { x: 0, y: 0 };
+  const p = m[1].split(',').map((s) => parseFloat(s.trim()) || 0);
+  return { x: p[0] || 0, y: p[1] || 0 };
+}
+function makeDraggable(box, handle) {
+  if (!box || !handle || box.dataset.draggable === '1') return;
+  box.dataset.draggable = '1';
+  let dragging = false, sx = 0, sy = 0, bx = 0, by = 0, bl = 0, bt = 0;
+  const apply = (x, y) => { box.style.transform = `translate(${x}px, ${y}px)`; };
+  handle.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || e.target.closest('button, input, select, textarea, a')) return;
+    const o = readTranslate(box), r = box.getBoundingClientRect();
+    bx = o.x; by = o.y; bl = r.left - o.x; bt = r.top - o.y;
+    sx = e.clientX; sy = e.clientY; dragging = true;
+    document.body.classList.add('dragging');
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const hh = handle.offsetHeight || 40;
+    const minX = 8 - bl, maxX = window.innerWidth - 120 - bl;
+    const minY = -bt, maxY = window.innerHeight - hh - 8 - bt;
+    apply(Math.max(minX, Math.min(maxX, bx + e.clientX - sx)),
+          Math.max(minY, Math.min(maxY, by + e.clientY - sy)));
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false; document.body.classList.remove('dragging');
+  });
+  handle.addEventListener('dblclick', (e) => {
+    if (e.target.closest('button, input, select, textarea, a')) return;
+    apply(0, 0);
+  });
+}
+function initModalDragging() {
+  document.querySelectorAll('.modal .modal-box').forEach((box) => makeDraggable(box, box.querySelector('.modal-head')));
+}
+
+/* ---------------- 会话连接状态与断开连接 ---------------- */
+function sessionTabsFor(sessionId) {
+  const out = [];
+  tabs.forEach((t) => {
+    if (t.session && t.session.id === sessionId) out.push(t);
+    else if (t.sessionKey === sessionId) out.push(t);
+  });
+  return out;
+}
+function isLive(tab) { return !!tab && (tab.connState === 'connected' || tab.connState === 'connecting'); }
+function refreshSessionOps() {
+  document.querySelectorAll('.session-item').forEach((row) => {
+    const live = sessionTabsFor(row.dataset.id).some(isLive);
+    row.classList.toggle('live', live);
+    const btn = row.querySelector('.op-disconnect');
+    if (btn) { btn.disabled = !live; btn.title = live ? '断开该会话的连接' : '当前没有活动连接'; }
+  });
+}
+/* 断开该会话的所有活动连接：清理主进程资源，保留标签与历史，方便再次连接排查 */
+function disconnectSession(s) {
+  const list = sessionTabsFor(s.id).filter(isLive);
+  if (!list.length) { status('该会话当前没有活动连接'); return; }
+  list.forEach((t) => {
+    try { api.sshDisconnect(t.id); } catch (_) {}
+    if (t.serial) { t.serialReading = false; try { t.serial.close(); } catch (_) {} t.serial = null; }
+    t.connState = 'closed';
+    if (t.term) t.term.writeln('\x1b[33m[已断开] 已从会话列表手动断开连接；历史记录保留，可再次「连接」或右键「重新连接」。\x1b[0m');
+  });
+  refreshSessionOps();
+  status(`已断开「${s.name || s.host}」的 ${list.length} 个连接`);
+}
+
+/* ---------------- 命令复制 / 发送到终端（调试时边查边用） ---------------- */
+function copyText(text, label) {
+  Promise.resolve(api.writeClipboard(text))
+    .then(() => status('已复制' + (label || '内容') + '到剪贴板'))
+    .catch(() => status('复制失败'));
+}
+function sendCommandToTerminal(text) {
+  const t = currentTab();
+  if (!t || !t.term) { copyText(text, '命令'); status('当前没有终端，命令已复制到剪贴板'); return; }
+  if (t.type === 'local') api.localWrite(t.id, text);
+  else if (t.ftp) { copyText(text, '命令'); status('FTP 标签不支持直接发送，命令已复制'); return; }
+  else api.sshWrite(t.id, text);
+  t.term.focus();
+  status(`已把「${text}」送到终端光标处（未执行，确认后回车）`);
+}
+
+/* ---------------- Linux 命令查询：非模态浮动面板 ----------------
+   没有全屏遮罩、不拦截终端点击；可拖动 / 缩放 / 收起 / 半透明，
+   位置与尺寸写入 localStorage，下次启动保持，方便固定在一角随查随用。 */
+const LINUX_PANEL_KEY = 'openshell.linuxpanel.v1';
+function initLinuxPanel() {
+  const panel = $('linux-modal'), handle = $('linux-drag-handle'), resizer = $('linux-resize');
+  if (!panel || !handle) return;
+  const saved = loadJSON(LINUX_PANEL_KEY, null);
+  if (saved && typeof saved === 'object') {
+    if (Number.isFinite(saved.w)) panel.style.width = Math.max(320, saved.w) + 'px';
+    if (Number.isFinite(saved.h)) panel.style.height = Math.max(180, saved.h) + 'px';
+    if (Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
+      panel.style.left = Math.max(0, Math.min(saved.x, window.innerWidth - 120)) + 'px';
+      panel.style.top = Math.max(0, Math.min(saved.y, window.innerHeight - 40)) + 'px';
+      panel.style.right = 'auto';
+    }
+    if (saved.peek) { panel.classList.add('peek'); $('linux-btn-peek').classList.add('on'); }
+    if (saved.minimized) { panel.classList.add('minimized'); $('linux-btn-min').textContent = '▢'; }
+  }
+  const savePanel = () => {
+    const r = panel.getBoundingClientRect();
+    saveJSON(LINUX_PANEL_KEY, {
+      x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height),
+      peek: panel.classList.contains('peek'), minimized: panel.classList.contains('minimized')
+    });
+  };
+  window.__linuxPanel = { panel, handle, savePanel, reset: () => {
+    ['left', 'top', 'right', 'width', 'height'].forEach((k) => { panel.style[k] = ''; });
+    panel.classList.remove('minimized', 'peek');
+    saveJSON(LINUX_PANEL_KEY, null);
+  } };
+  // 拖动
+  let dragging = false, sx = 0, sy = 0, sl = 0, st = 0;
+  handle.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || e.target.closest('button, input, select, textarea, a')) return;
+    const r = panel.getBoundingClientRect();
+    panel.style.left = r.left + 'px'; panel.style.top = r.top + 'px'; panel.style.right = 'auto';
+    sx = e.clientX; sy = e.clientY; sl = r.left; st = r.top;
+    dragging = true; document.body.classList.add('dragging'); e.preventDefault();
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const hh = handle.offsetHeight || 38;
+    panel.style.left = Math.max(0, Math.min(window.innerWidth - 120, sl + e.clientX - sx)) + 'px';
+    panel.style.top = Math.max(0, Math.min(window.innerHeight - hh, st + e.clientY - sy)) + 'px';
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false; document.body.classList.remove('dragging'); savePanel();
+  });
+  handle.addEventListener('dblclick', (e) => {
+    if (e.target.closest('button, input, select, textarea, a')) return;
+    window.__linuxPanel.reset();
+  });
+  // 缩放
+  if (resizer) {
+    let resizing = false, rx = 0, ry = 0, rw = 0, rh = 0;
+    resizer.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      const r = panel.getBoundingClientRect();
+      panel.style.left = r.left + 'px'; panel.style.top = r.top + 'px'; panel.style.right = 'auto';
+      rx = e.clientX; ry = e.clientY; rw = r.width; rh = r.height;
+      resizing = true; document.body.classList.add('resizing');
+      e.preventDefault(); e.stopPropagation();
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!resizing) return;
+      const left = parseFloat(panel.style.left) || 0, top = parseFloat(panel.style.top) || 0;
+      panel.style.width = Math.max(320, Math.min(window.innerWidth - left - 8, rw + e.clientX - rx)) + 'px';
+      panel.style.height = Math.max(180, Math.min(window.innerHeight - top - 8, rh + e.clientY - ry)) + 'px';
+    });
+    window.addEventListener('mouseup', () => {
+      if (!resizing) return;
+      resizing = false; document.body.classList.remove('resizing'); savePanel();
+    });
+  }
+  // 工具按钮
+  $('linux-btn-close').onclick = () => panel.classList.add('hidden');
+  $('linux-btn-min').onclick = () => {
+    const on = panel.classList.toggle('minimized');
+    $('linux-btn-min').textContent = on ? '▢' : '—';
+    $('linux-btn-min').title = on ? '展开面板' : '收起为标题栏（不遮挡终端）';
+    savePanel();
+  };
+  $('linux-btn-peek').onclick = () => {
+    const on = panel.classList.toggle('peek');
+    $('linux-btn-peek').classList.toggle('on', on);
+    $('linux-btn-peek').title = on ? '关闭半透明模式' : '半透明模式：鼠标移入恢复清晰，方便看下方终端';
+    savePanel();
+  };
+}
+
 /* ---------------- 会话管理 ---------------- */
 function getSessions() { return loadJSON(SESSIONS_KEY, []); }
 function saveSessions(list) { saveJSON(SESSIONS_KEY, list); renderSessions(); }
@@ -70,7 +252,8 @@ function renderSessions() {
     tree.appendChild(title);
     items.forEach((s) => {
       const row = document.createElement('div');
-      row.className = 'session-item' + (selectedSessionId === s.id ? ' active' : '');
+      const live = sessionTabsFor(s.id).some(isLive);
+      row.className = 'session-item' + (selectedSessionId === s.id ? ' active' : '') + (live ? ' live' : '');
       row.dataset.id = s.id;
       const dot = document.createElement('span');
       dot.className = 'dot';
@@ -94,11 +277,17 @@ function renderSessions() {
       connectBtn.title = '连接';
       connectBtn.textContent = '连接';
       connectBtn.onclick = (e) => { e.stopPropagation(); connectSession(s); };
+      const discBtn = document.createElement('button');
+      discBtn.className = 'op-disconnect';
+      discBtn.title = live ? '断开该会话的连接' : '当前没有活动连接';
+      discBtn.textContent = '断开';
+      discBtn.disabled = !live;
+      discBtn.onclick = (e) => { e.stopPropagation(); disconnectSession(s); };
       const editBtn = document.createElement('button');
       editBtn.title = '编辑';
       editBtn.textContent = '✎';
       editBtn.onclick = (e) => { e.stopPropagation(); openSessionModal(s.id); };
-      ops.append(connectBtn, editBtn);
+      ops.append(connectBtn, discBtn, editBtn);
       row.append(dot, meta, ops);
       row.onclick = () => { selectedSessionId = s.id; renderSessions(); };
       row.ondblclick = () => connectSession(s);
@@ -304,6 +493,7 @@ function closeTab(id) {
   t.slot.remove();
   t.el.remove();
   tabs.delete(id);
+  refreshSessionOps();
   if (activeTabId === id) {
     const rest = [...tabs.keys()];
     if (rest.length) activateTab(rest[rest.length - 1]);
@@ -325,14 +515,16 @@ api.on('ssh:close', (tabId) => {
   // 握手/认证失败后紧随而来的 close 不应把 failed 覆盖成 closed，保留失败原因便于排查
   if (tab && tab.connState !== 'failed') tab.connState = 'closed';
   status('连接已关闭');
+  refreshSessionOps();
 });
 api.on('ssh:error', (tabId, message) => {
   const tab = tabs.get(tabId);
   if (tab) tab.connState = 'failed';
   if (tab && tab.term) tab.term.writeln('\x1b[31m[ERROR] ' + String(message) + '\x1b[0m');
   status('连接失败');
+  refreshSessionOps();
 });
-api.on('ssh:status', (_tabId, text) => status(String(text)));
+api.on('ssh:status', (_tabId, text) => { status(String(text)); refreshSessionOps(); });
 api.on('ssh:progress', (tabId, text) => {
   const tab = tabs.get(tabId);
   if (tab && tab.term) tab.term.writeln(String(text));
@@ -462,6 +654,7 @@ async function connectIntoTab(tab, session, protocol) {
   tab.sessionKey = session.id || `${protocol}|${session.host}|${session.port}|${session.user}`;
   tab.connState = 'connecting';
   tab.attempts = (tab.attempts || 0) + 1;
+  refreshSessionOps();
   const cyan = '\x1b[36m', dim = '\x1b[2m', reset = '\x1b[0m';
   if (tab.attempts > 1) {
     // 重连：保留历史错误信息，仅追加醒目的分隔标记
@@ -490,12 +683,14 @@ async function connectIntoTab(tab, session, protocol) {
     // 主进程现在会真正等待握手：ok:false 表示握手/认证失败
     if (result && result.ok === false) {
       tab.connState = 'failed';
+      refreshSessionOps();
       // 错误信息已由主进程通过 ssh:error 事件写入终端，这里只补充排查提示
       term.writeln('\x1b[33m可在本标签右键选择“重新连接”，或从左侧会话列表再次连接（历史错误信息会保留）。\x1b[0m');
       status('连接失败');
       return;
     }
     tab.connState = 'connected';
+    refreshSessionOps();
     // 不再写假的"连接成功"：主进程在 ready 时已推送"认证成功/已连接"
     if (protocol === 'sftp') {
       setTimeout(() => {
@@ -504,6 +699,7 @@ async function connectIntoTab(tab, session, protocol) {
     }
   } catch (e) {
     tab.connState = 'failed';
+    refreshSessionOps();
     // IPC 层异常时才在此写错误（主进程的 ssh:error 不会重复这条）
     term.writeln('\x1b[31m[连接失败] ' + String(e && e.message ? e.message : e) + '\x1b[0m');
     term.writeln('\x1b[33m可在本标签右键选择“重新连接”，或从左侧会话列表再次连接（历史错误信息会保留）。\x1b[0m');
@@ -555,6 +751,7 @@ async function connectSession(session) {
     tab.onDataDisposable = term.onData((data) => api.localWrite(tab.id, data));
     try { await api.localSpawn(tab.id); tab.connState = 'connected'; }
     catch (e) { tab.connState = 'failed'; term.writeln('\x1b[31m[启动失败] ' + String(e && e.message ? e.message : e) + '\x1b[0m'); status('启动失败'); }
+    refreshSessionOps();
     return;
   }
   // FTP：建立控制连接，文件列表通过 FTP 面板呈现
@@ -578,6 +775,7 @@ async function connectSession(session) {
       term.writeln('\x1b[33m可在本标签右键选择“重新连接”重试。\x1b[0m');
       status('连接失败');
     }
+    refreshSessionOps();
     return;
   }
   // SSH / Telnet / RLOGIN / Raw / SFTP：优先复用同会话的失败/断开标签
@@ -1287,6 +1485,7 @@ document.querySelectorAll('#context-menu button[data-action]').forEach((btn) => 
     if (!s) return;
     const action = btn.dataset.action;
     if (action === 'connect') connectSession(s);
+    else if (action === 'disconnect') disconnectSession(s);
     else if (action === 'edit') openSessionModal(s.id);
     else if (action === 'duplicate') {
       const copy = {
@@ -1599,13 +1798,21 @@ function renderLinuxList() {
     const name = document.createElement('span');
     name.className = 'linux-cmd';
     name.textContent = c.cmd;
+    name.title = '点击复制命令：' + c.cmd;
+    name.onclick = () => copyText(c.cmd, '命令 ' + c.cmd);
     const title = document.createElement('span');
     title.className = 'linux-name';
     title.textContent = c.name;
     const tag = document.createElement('span');
     tag.className = 'linux-cat';
     tag.textContent = c.category;
-    head.append(name, title, tag);
+    const send = document.createElement('button');
+    send.className = 'linux-send';
+    send.type = 'button';
+    send.textContent = '发送到终端';
+    send.title = '把该命令送到当前终端光标处（不自动执行，确认后回车）';
+    send.onclick = () => sendCommandToTerminal(c.cmd);
+    head.append(name, title, tag, send);
     const desc = document.createElement('div');
     desc.className = 'linux-desc';
     desc.textContent = c.desc;
@@ -1634,6 +1841,8 @@ function renderLinuxList() {
         const row = document.createElement('div');
         const code = document.createElement('code');
         code.textContent = '$ ' + ex.cmd;
+        code.title = '点击复制示例：' + ex.cmd;
+        code.onclick = () => copyText(ex.cmd, '示例命令');
         const d = document.createElement('span');
         d.textContent = ex.desc;
         row.append(code, d);
@@ -1651,8 +1860,23 @@ function openLinuxModal() {
     cats.forEach((c) => { const o = document.createElement('option'); o.value = c; o.textContent = c; sel.appendChild(o); });
     linuxReady = true;
   }
-  $('linux-modal').classList.remove('hidden');
+  const panel = $('linux-modal');
+  const minBtn = $('linux-btn-min');
+  const expandMinimized = () => {
+    panel.classList.remove('minimized');
+    if (minBtn) { minBtn.textContent = '—'; minBtn.title = '收起为标题栏（不遮挡终端）'; }
+  };
+  // 非模态浮动面板：再次点击菜单时若已显示则收起（相当于 toggle），方便反复查命令
+  if (!panel.classList.contains('hidden')) {
+    // 已收起为标题栏时，点菜单先展开，而不是直接关掉
+    if (panel.classList.contains('minimized')) { expandMinimized(); return; }
+    panel.classList.add('hidden'); return;
+  }
+  panel.classList.remove('hidden');
+  // 收起状态时点开自动展开，避免看起来「没反应」
+  expandMinimized();
   renderLinuxList();
+  setTimeout(() => { try { $('linux-search').focus(); } catch (_) {} }, 30);
 }
 $('linux-search').oninput = renderLinuxList;
 $('linux-category').onchange = renderLinuxList;
@@ -1715,4 +1939,8 @@ if (!api || !Fmt || !Terminal || !FitAddon) {
   }
   renderSessions();
   applyPrefs();
+  // 所有模态框（新建会话、设置、密码框等）支持按住标题栏拖动
+  initModalDragging();
+  // Linux 命令查询：非模态浮动面板的拖动 / 缩放 / 收起 / 位置记忆
+  initLinuxPanel();
 }
